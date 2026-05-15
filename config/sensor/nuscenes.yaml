@@ -1,0 +1,130 @@
+description: "Front 3-camera test layout"
+sensors:
+  - id: cam_front
+    channel: CAM_FRONT
+    modality: camera_rgb
+    blueprint: sensor.camera.rgb
+    enabled: true
+    rate_hz: 12
+    transform:
+      x: 1.5
+      y: 0.0
+      z: 1.6
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+    output:
+      width: 1600
+      height: 900
+      fov: 70
+
+#  - id: cam_front_left
+#    channel: CAM_FRONT_LEFT
+#    modality: camera_rgb
+#    blueprint: sensor.camera.rgb
+#    enabled: true
+#    rate_hz: 12
+#    transform:
+#      x: 1.5
+#      y: -0.55
+#      z: 1.6
+#      roll: 0.0
+#      pitch: 0.0
+#      yaw: -55
+#    output:
+#      width: 1600
+#      height: 900
+#      fov: 70
+#
+#  - id: cam_front_right
+#    channel: CAM_FRONT_RIGHT
+#    modality: camera_rgb
+#    blueprint: sensor.camera.rgb
+#    enabled: true
+#    rate_hz: 12
+#    transform:
+#      x: 1.5
+#      y: 0.55
+#      z: 1.6
+#      roll: 0.0
+#      pitch: 0.0
+#      yaw: 55
+#    output:
+#      width: 1600
+#      height: 900
+#      fov: 70
+  
+  - id: lidar_top_semantic
+    channel: LIDAR_TOP
+    modality: lidar_semantic
+    blueprint: sensor.lidar.ray_cast_semantic
+    enabled: true
+    rate_hz: 12
+    transform:
+      x: 0.0
+      y: 0.0
+      z: 1.8
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+    output:
+      channels: 128
+      range: 80
+      points_per_second: 3200000
+      rotation_frequency: 12
+      rotation_frequency: 20
+      upper_fov: 10       # 上视场角 (度)
+      lower_fov: -30      # 下视场角 (度)
+      horizontal_fov: 360 # 水平视场角 (度), 360=旋转式, 120=左右各60°
+
+  - id: gnss
+    channel: GNSS
+    modality: gnss
+    blueprint: sensor.other.gnss
+    enabled: true
+    rate_hz: 20
+    transform:
+      x: 0.0
+      y: 0.0
+      z: 2.0
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+
+  - id: imu
+    channel: IMU
+    modality: imu
+    blueprint: sensor.other.imu
+    enabled: true
+    rate_hz: 20
+    transform:
+      x: 0.0
+      y: 0.0
+      z: 2.0
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+
+  - id: occ_grid
+    channel: OCC_GT
+    modality: occupancy
+    enabled: true
+    rate_hz: 20
+    transform:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+    output:
+      x_min_m: -100.0
+      x_max_m: 100.0
+      y_min_m: -100.0
+      y_max_m: 100.0
+      z_min_m: -2.0
+      z_max_m: 4.0
+      resolution_m: 0.5
+      include_categories:
+        - vehicle
+        - pedestrian
