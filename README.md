@@ -6,7 +6,11 @@ CARLA 0.9.14 仿真数据自动采集工具。
 
 ```bash
 conda activate carla
-python run.py                      # 使用 config/main/default.yaml
+bash scripts/start_carla.sh        # 启动 CARLA（后台运行）
+python run.py                       # 运行采集
+bash scripts/stop_carla.sh         # 停止 CARLA
+
+# 可使用其他主配置
 python run.py config/main/other.yaml
 ```
 
