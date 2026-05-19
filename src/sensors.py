@@ -78,9 +78,10 @@ def _compute_intrinsic(spec):
     out = spec.get("output", {})
     w = out.get("width", 1280)
     h = out.get("height", 720)
-    fov = math.radians(out.get("fov", 90))
-    fx = w / (2 * math.tan(fov / 2))
-    fy = h / (2 * math.tan(fov / 2))
+    hfov = math.radians(out.get("fov", 90))
+    vfov = 2 * math.atan(math.tan(hfov / 2) * h / w)
+    fx = w / (2 * math.tan(hfov / 2))
+    fy = h / (2 * math.tan(vfov / 2))
     return {"fx": fx, "fy": fy, "cx": w / 2, "cy": h / 2, "width": w, "height": h}
 
 
@@ -111,10 +112,15 @@ def _attach_camera(world, vehicle, bp_lib, spec, transform, save_dir):
 
 # Shared state: last frame captured per sensor channel
 _sensor_frames = {}
+_sensor_data = {}  # channel → latest point cloud array
 
 
 def get_sensor_frames():
     return _sensor_frames
+
+
+def get_sensor_data():
+    return _sensor_data
 
 
 def _camera_callback(save_dir, channel):
@@ -254,8 +260,10 @@ def _attach_lidar(world, vehicle, bp_lib, spec, transform, save_dir):
 def _lidar_callback(save_dir, channel):
     def cb(data):
         _sensor_frames[channel] = data.frame
-        points = np.frombuffer(data.raw_data, dtype=np.float32)
+        points = np.frombuffer(data.raw_data, dtype=np.float32).copy()
         points = points.reshape((-1, 4))
+        points[:, 1] = -points[:, 1]  # Y: right → left (standard)
+        _sensor_data[channel] = points
         np.save(os.path.join(save_dir, f"{data.frame:08d}.npy"), points)
 
     return cb
@@ -282,8 +290,10 @@ def _attach_semantic_lidar(world, vehicle, bp_lib, spec, transform, save_dir):
 def _semantic_lidar_callback(save_dir, channel):
     def cb(data):
         _sensor_frames[channel] = data.frame
-        points = np.frombuffer(data.raw_data, dtype=np.float32)
+        points = np.frombuffer(data.raw_data, dtype=np.float32).copy()
         points = points.reshape((-1, 6))  # x, y, z, cos_angle, obj_tag, obj_idx
+        points[:, 1] = -points[:, 1]  # Y: right → left (standard)
+        _sensor_data[channel] = points
         np.save(os.path.join(save_dir, f"{data.frame:08d}.npy"), points)
 
     return cb
@@ -343,8 +353,8 @@ def _imu_callback(save_dir):
         writer.writerow(
             [
                 data.frame, data.timestamp,
-                data.accelerometer.x, data.accelerometer.y, data.accelerometer.z,
-                data.gyroscope.x, data.gyroscope.y, data.gyroscope.z,
+                data.accelerometer.x, -data.accelerometer.y, data.accelerometer.z,
+                -data.gyroscope.x, data.gyroscope.y, -data.gyroscope.z,
                 data.compass,
             ]
         )

@@ -42,12 +42,30 @@ OCC_COLORS = {
 }
 
 
-def convert_run(run_dir, quality=95):
+def _load_sensor_layout(run_dir):
+    """Load sensor layout YAML with vis flags, saved by collector."""
+    path = os.path.join(run_dir, "sensor_layout.yaml")
+    if os.path.exists(path):
+        with open(path) as f:
+            import yaml
+            return yaml.safe_load(f)
+    return {}
+
+def _cam_vis_enabled(layout, channel, key, default=True):
+    """Check per-camera vis flag in sensor layout."""
+    for s in layout.get("sensors", []):
+        if s.get("channel") == channel:
+            return s.get(key, default)
+    return default
+
+def convert_run(run_dir, quality=95, force_all=False):
+    layout = _load_sensor_layout(run_dir)
     _convert_orin(run_dir, quality)
-    _depth_visualization(run_dir, quality)
-    _semantic_visualization(run_dir)
-    _annotation_visualization(run_dir)
+    _depth_visualization(run_dir, layout, quality, force_all)
+    _semantic_visualization(run_dir, layout, force_all)
     _generate_occ(run_dir)
+    _annotation_visualization(run_dir, layout, force_all)
+    _trajectory_visualization(run_dir, layout, force_all)
 
 
 def _convert_orin(run_dir, quality):
@@ -67,8 +85,11 @@ def _convert_orin(run_dir, quality):
                 os.remove(npy_path)
 
 
-def _depth_visualization(run_dir, quality):
+def _depth_visualization(run_dir, layout, quality, force_all=False):
     for cam_dir in sorted(glob.glob(os.path.join(run_dir, "CAM_*"))):
+        channel = os.path.basename(cam_dir)
+        if not force_all and not _cam_vis_enabled(layout, channel, "depth_vis", True):
+            continue
         src_dir = os.path.join(cam_dir, "depth")
         if not os.path.isdir(src_dir):
             continue
@@ -103,7 +124,7 @@ def _load_grid_params(run_dir):
 
 def _load_ego_poses(run_dir):
     poses = {}
-    path = os.path.join(run_dir, "ego_trajectory.csv")
+    path = os.path.join(run_dir, "TRAJ", "ego_trajectory.csv")
     if not os.path.exists(path):
         return poses
     with open(path) as f:
@@ -163,9 +184,10 @@ def _label_lidar_with_camera(run_dir, lidar_points, frame, ego_poses):
     h, w = sem_img.shape
 
     # Camera intrinsic (consistent with sensor config)
-    fov = m.radians(70)
-    fx = w / (2 * m.tan(fov / 2))
-    fy = h / (2 * m.tan(fov / 2))
+    hfov = m.radians(70)
+    vfov = 2 * m.atan(m.tan(hfov / 2) * h / w)
+    fx = w / (2 * m.tan(hfov / 2))
+    fy = h / (2 * m.tan(vfov / 2))
     cx, cy = w / 2, h / 2
 
     # Camera → world rotation matrix
@@ -177,12 +199,17 @@ def _label_lidar_with_camera(run_dir, lidar_points, frame, ego_poses):
     R_roll = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
     R_cam = R_yaw @ R_pitch @ R_roll  # camera→world rotation
 
-    # World → camera: R_cam^T @ (p_world - cam_pos)
-    px = lidar_points[:, 0] - cam_wx
-    py = lidar_points[:, 1] - cam_wy
-    pz = lidar_points[:, 2] - cam_wz
-    pts_world = np.stack([px, py, pz], axis=-1)  # (N, 3)
-    pts_cam = (R_cam.T @ pts_world.T).T  # (N, 3)
+    # LiDAR data is already in ego frame: X=fwd, Y=left, Z=sensor-local+1.8=ego
+    lx_ego = lidar_points[:, 0]
+    ly_ego = lidar_points[:, 1]
+    lz_ego = lidar_points[:, 2] + 1.8
+
+    # Camera in ego: at (1.5, 0, 1.6), same orientation as ego
+    # Direct ego→camera (no world round-trip)
+    cam_X = lx_ego - 1.5   # forward (camera is 1.5m ahead of ego center)
+    cam_Y = ly_ego          # left (camera is at y=0)
+    cam_Z = lz_ego - 1.6   # up (camera is 1.6m above ego origin)
+    pts_cam = np.stack([cam_X, cam_Y, cam_Z], axis=-1)
 
     X = pts_cam[:, 0]  # forward
     Y = pts_cam[:, 1]  # right
@@ -205,9 +232,12 @@ def _label_lidar_with_camera(run_dir, lidar_points, frame, ego_poses):
     return tags
 
 
-def _semantic_visualization(run_dir):
+def _semantic_visualization(run_dir, layout, force_all=False):
     """Generate colorized semantic PNGs in semantic_viz/"""
     for cam_dir in sorted(glob.glob(os.path.join(run_dir, "CAM_*"))):
+        channel = os.path.basename(cam_dir)
+        if not force_all and not _cam_vis_enabled(layout, channel, "semantic_vis", True):
+            continue
         src_dir = os.path.join(cam_dir, "semantic")
         if not os.path.isdir(src_dir):
             continue
@@ -226,13 +256,24 @@ def _semantic_visualization(run_dir):
             Image.fromarray(rgb).save(os.path.join(viz_dir, fname))
 
 
-def _annotation_visualization(run_dir):
-    """Draw 2D bounding boxes on camera images."""
+def _annotation_visualization(run_dir, layout, force_all=False):
+    """Draw 2D/3D bounding boxes on camera and OCC images."""
+    _camera_annotation_viz(run_dir, layout, force_all)
+    _lidar_annotation_viz(run_dir, layout, force_all)
+
+
+def _camera_annotation_viz(run_dir, layout, force_all=False):
     import json
-    # Category colors (BGR for PIL drawing)
-    COLORS = {"vehicle": (0, 255, 0), "pedestrian": (0, 0, 255)}
+    COLORS = {"vehicle": (0, 255, 0), "pedestrian": (0, 0, 255),
+         "static_car": (255, 200, 0), "static_truck": (255, 150, 0),
+         "static_bus": (255, 100, 0), "static_train": (255, 50, 0),
+         "static_motorcycle": (255, 200, 50), "static_bicycle": (255, 200, 100),
+         "static_pedestrian": (200, 100, 255)}
 
     for cam_dir in sorted(glob.glob(os.path.join(run_dir, "CAM_*"))):
+        channel = os.path.basename(cam_dir)
+        if not force_all and not _cam_vis_enabled(layout, channel, "annotation_vis", True):
+            continue
         orin_dir = os.path.join(cam_dir, "original")
         ann_dir = os.path.join(cam_dir, "annotations")
         if not os.path.isdir(orin_dir) or not os.path.isdir(ann_dir):
@@ -261,11 +302,111 @@ def _annotation_visualization(run_dir):
                 if bbox is None:
                     continue
                 x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                if x2 <= x1 or y2 <= y1:
+                    continue
                 color = COLORS.get(a.get("category", "vehicle"), (0, 255, 0))
                 draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
                 label = f"{a['category']}_{a['actor_id']}"
                 draw.text((x1, y1 - 10), label, fill=color)
             img.save(os.path.join(viz_dir, fname))
+
+
+def _lidar_annotation_viz(run_dir, layout, force_all=False):
+    """Draw 3D LiDAR annotation bboxes on raw LiDAR point cloud BEV."""
+    import json
+    from PIL import ImageDraw
+    if not force_all:
+        for s in layout.get("sensors", []):
+            if s.get("modality") in ("lidar", "lidar_semantic") and s.get("enabled", True):
+                if not s.get("annotation_vis", True):
+                    return
+                break
+
+    for lidar_channel in sorted(glob.glob(os.path.join(run_dir, "LIDAR_*"))):
+        channel = os.path.basename(lidar_channel)
+        lidar_dir = os.path.join(run_dir, channel, "original")
+        lidar_ann_dir = os.path.join(run_dir, channel, "annotations")
+        if not os.path.isdir(lidar_dir) or not os.path.isdir(lidar_ann_dir):
+            continue
+
+        COLORS = {"vehicle": (0, 255, 0), "pedestrian": (0, 0, 255),
+             "static_car": (255, 200, 0), "static_truck": (255, 150, 0),
+             "static_bus": (255, 100, 0), "static_motorcycle": (255, 200, 50),
+             "static_bicycle": (255, 200, 100)}
+        ann_viz_dir = os.path.join(run_dir, channel, "annotations_viz")
+        os.makedirs(ann_viz_dir, exist_ok=True)
+
+        lidar_files = sorted(glob.glob(os.path.join(lidar_dir, "*.npy")))
+        rng, scale, vmin, vmax = 60, 6, -1.5, 3.0  # range ±60m, 6x upscale, Z clip
+        size = int(2 * rng / 0.1)  # 0.1m/pixel raw
+
+        print(f"{channel}/annotations_viz: {len(lidar_files)} frames")
+        for lpath in lidar_files:
+            frame_str = os.path.basename(lpath).replace(".npy", "")
+            ann_path = os.path.join(lidar_ann_dir, f"{frame_str}.json")
+            if not os.path.exists(ann_path):
+                continue
+            with open(ann_path) as f:
+                anns = json.load(f)
+            if not anns:
+                continue
+
+            points = np.load(lpath)  # (N, 4) or (N, 6), X=fwd, Y=left, Z=up
+            lx, ly, lz = points[:,0], points[:,1], points[:,2] + 1.8  # sensor→ego Z shift
+
+            # Clip Z and XY range
+            z_valid = (lz > vmin) & (lz < vmax)
+            xy_valid = (np.abs(lx) < rng) & (np.abs(ly) < rng)
+            valid = z_valid & xy_valid
+            lx, ly, lz = lx[valid], ly[valid], lz[valid]
+            if len(lx) == 0:
+                continue
+
+            # Create BEV image (intensity from Z)
+            img = np.zeros((size, size), dtype=np.uint8)
+            px = ((rng - lx) / (2*rng) * size).astype(int)  # X=fwd → up
+            py = ((rng - ly) / (2*rng) * size).astype(int)    # Y=left → left
+            px = np.clip(px, 0, size-1); py = np.clip(py, 0, size-1)
+            # Height color: low=dark, high=bright
+            lz_clip = np.clip(lz, vmin, vmax)
+            intensity = ((lz_clip - vmin) / (vmax - vmin) * 255).astype(np.uint8)
+            np.maximum.at(img, (px, py), intensity)
+
+            # Colorize and upscale
+            img_color = np.stack([img, img, img], axis=-1)
+            img_big = np.repeat(np.repeat(img_color, scale, axis=0), scale, axis=1)
+            h_img, w_img = img_big.shape[:2]
+
+            # Ego marker at center
+            cy, cx = h_img//2, w_img//2
+            rr, cc = np.meshgrid(np.arange(h_img), np.arange(w_img), indexing='ij')
+            img_big[(rr-cy)**2 + (cc-cx)**2 < (1*scale)**2] = (0, 255, 0)
+
+            # Draw 3D bboxes
+            pil_img = Image.fromarray(img_big)
+            draw = ImageDraw.Draw(pil_img)
+            pix_per_m = scale * size / (2*rng)  # pixels per meter
+            for a in anns:
+                loc = a["location"]; bb = a["bbox_3d"]
+                if bb["x"] == 0 or bb["y"] == 0:
+                    continue
+                fx, fy = loc["x"], loc["y"]
+                yaw = m.radians(a["rotation"]["yaw"])
+                hx, hy = bb["x"]/2, bb["y"]/2
+                cr, sr = m.cos(yaw), m.sin(yaw)
+                corners = np.array([[hx, hy], [hx, -hy], [-hx, -hy], [-hx, hy]])
+                rot = np.array([[cr, -sr], [sr, cr]])
+                corners = (rot @ corners.T).T
+                corners[:,0] += fx; corners[:,1] += fy
+                # Ego → pixel
+                px_c = ((rng - corners[:,0]) * pix_per_m).astype(int)
+                py_c = ((rng - corners[:,1]) * pix_per_m).astype(int)
+                pts = [(int(py_c[i]), int(px_c[i])) for i in range(4)]
+                color = COLORS.get(a.get("category", "vehicle"), (0, 255, 0))
+                draw.polygon(pts, outline=color)
+                draw.text((int(py_c[0]), int(px_c[0])-10), f"{a['category']}_{a['actor_id']}", fill=color)
+
+            pil_img.save(os.path.join(ann_viz_dir, f"{frame_str}.png"))
 
 
 def _generate_occ(run_dir):
@@ -290,18 +431,13 @@ def _generate_occ(run_dir):
         for lpath in lidar_files:
             frame_str = os.path.basename(lpath).replace(".npy", "")
             frame = int(frame_str)
-            if frame not in ego_poses:
-                continue
             occ_path = os.path.join(occ_dir, f"{frame_str}.npy")
             points = np.load(lpath)
-            # Transform to ego frame
-            ego = ego_poses[frame]
-            eyaw = m.radians(ego["yaw"])
-            cy, sy = m.cos(eyaw), m.sin(eyaw)
-            px, py, pz = points[:,0]-ego["x"], points[:,1]-ego["y"], points[:,2]-ego["z"]
-            ex = cy*px + sy*py
-            ey = -sy*px + cy*py
-            ez = pz
+            # LiDAR data already in standard coords: X=forward, Y=left, Z=up
+            # Sensor at ego (0,0,1.8), shift Z only
+            ex = points[:, 0]        # forward
+            ey = points[:, 1]        # left (already standard)
+            ez = points[:, 2] + 1.8  # up (sensor at z=1.8 in ego)
             ix = np.floor((ex-x_min)/res).astype(np.int32)
             iy = np.floor((ey-y_min)/res).astype(np.int32)
             iz = np.floor((ez-z_min)/res).astype(np.int32)
@@ -341,22 +477,14 @@ def _generate_occ(run_dir):
             if not anns:
                 continue
             grid = np.load(occ_path)
-            ego = ego_poses[frame]
-            eyaw = m.radians(ego["yaw"])
-            cy, sy = m.cos(eyaw), m.sin(eyaw)
             for a in anns:
                 cat = actor_map.get(a.get("category"), 21)
                 loc, rot, bb = a["location"], a["rotation"], a["bbox_3d"]
-                dx, dy, dz = loc["x"]-ego["x"], loc["y"]-ego["y"], loc["z"]-ego["z"]
-                rel_y = m.radians(rot["yaw"]) - eyaw
-                cr, sr = m.cos(rel_y), m.sin(rel_y)
+                # Annotations in ego frame: X=forward, Y=left, Z=up
+                cx, cy_e, cz_e = loc["x"], loc["y"], loc["z"]
+                rel_yaw = m.radians(rot["yaw"])
+                cr, sr = m.cos(rel_yaw), m.sin(rel_yaw)
                 hx, hy, hz = bb["x"]/2, bb["y"]/2, bb["z"]/2
-                cx = cy*dx + sy*dy
-                cz = cy*dy - sy*dx  # wait this is wrong - let me fix
-                # Actually: cy = ego y in ego frame
-                cx = cy*dx + sy*dy
-                cy_e = -sy*dx + cy*dy
-                cz_e = dz
                 corners = np.array([[hx, hy], [hx, -hy], [-hx, -hy], [-hx, hy]])
                 rot_m = np.array([[cr, -sr], [sr, cr]])
                 corners = np.dot(corners, rot_m.T)
@@ -398,7 +526,7 @@ def _occ_visualization(run_dir, occ_dir, x_min, x_max, y_min, y_max, res):
     for npy_path in npy_files:
         grid = np.load(npy_path)
         bev = grid.max(axis=0)
-        bev_img = np.flipud(bev.T)
+        bev_img = np.flipud(np.fliplr(bev.T))  # (X,Y), row0=x_max, col0=y_max(=left)
         rgb = np.zeros((bev_img.shape[0], bev_img.shape[1], 3), dtype=np.uint8)
         for cat, color in OCC_COLORS.items():
             rgb[bev_img == cat] = color
@@ -420,13 +548,83 @@ def _occ_visualization(run_dir, occ_dir, x_min, x_max, y_min, y_max, res):
         h, w = rgb_big.shape[:2]
         if 0 <= ego_r < h and 0 <= ego_c < w:
             rr, cc = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
-            rgb_big[(rr-ego_r)**2 + (cc-ego_c)**2 < (4*scale)**2] = (0, 255, 0)
+            rgb_big[(rr-ego_r)**2 + (cc-ego_c)**2 < (1*scale)**2] = (0, 255, 0)
         fname = os.path.basename(npy_path).replace(".npy", ".png")
         Image.fromarray(rgb_big).save(os.path.join(viz_dir, fname))
 
 
+def _trajectory_visualization(run_dir, layout, force_all=False):
+    """Draw ego trajectory BEV, accumulating over frames. 90° CCW: X=fwd→up, Y=left→left."""
+    if not force_all and not layout.get("trajectory_vis", True):
+        return
+    poses = _load_ego_poses(run_dir)
+    if not poses:
+        return
+    frames = sorted(poses.keys())
+    if len(frames) < 1:
+        return
+
+    # Determine range from trajectory extent
+    xs = [p["x"] for p in poses.values()]
+    ys = [p["y"] for p in poses.values()]
+    margin = 15.0
+    x_min, x_max = min(xs) - margin, max(xs) + margin
+    y_min, y_max = min(ys) - margin, max(ys) + margin
+    span_x, span_y = x_max - x_min, y_max - y_min
+    span = max(span_x, span_y, 1.0)
+
+    rng = span / 2 + margin
+    cx = (x_min + x_max) / 2
+    cy = (y_min + y_max) / 2
+    res = 0.2  # m/pixel
+    size = int(2 * rng / res)
+
+    viz_dir = os.path.join(run_dir, "TRAJ", "trajectory_viz")
+    os.makedirs(viz_dir, exist_ok=True)
+    print(f"trajectory_viz: {len(frames)} frames")
+
+    for i, frame in enumerate(frames):
+        hist_x, hist_y = [], []
+        for j in range(i + 1):
+            p = poses[frames[j]]
+            hist_x.append(p["x"])
+            hist_y.append(p["y"])
+
+        img = np.zeros((size, size, 3), dtype=np.uint8)
+        pix_per_m = size / (2 * rng)
+
+        from PIL import ImageDraw as _ImageDraw
+        pil_tmp = Image.fromarray(img)
+        draw_tmp = _ImageDraw.Draw(pil_tmp)
+        pts_pix = []
+        for fx, fy in zip(hist_x, hist_y):
+            # 90° CCW: forward(X)→up, left(Y)→left
+            # px = (cy+rng - fy) normalized, py = size - (fx - (cx-rng)) normalized
+            px = int(((cy + rng) - fy) * pix_per_m)   # Y=left → image X=left
+            py = int(size - (fx - (cx - rng)) * pix_per_m)  # X=fwd → image Y=up
+            pts_pix.append((px, py))
+        if len(pts_pix) >= 2:
+            draw_tmp.line(pts_pix, fill=(50, 100, 200), width=2)
+        img = np.array(pil_tmp)
+
+        if pts_pix:
+            px, py = pts_pix[-1]
+            rr, cc = np.meshgrid(np.arange(size), np.arange(size), indexing='ij')
+            dist = np.sqrt((rr - py)**2 + (cc - px)**2)
+            img[dist < 3] = (0, 255, 0)
+
+        # Scale up for visibility
+        scale = 4
+        img_big = np.repeat(np.repeat(img, scale, axis=0), scale, axis=1)
+
+        fname = f"{frame:08d}.png"
+        Image.fromarray(img_big).save(os.path.join(viz_dir, fname))
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python tools/npy2jpg.py output/<run_dir>")
+        print("Usage: python tools/npy2jpg.py output/<run_dir> [--all]")
+        print("  --all  强制生成所有可视化，忽略 sensor_layout.yaml 中的开关")
         sys.exit(1)
-    convert_run(sys.argv[1])
+    force_all = "--all" in sys.argv
+    convert_run(sys.argv[1], force_all=force_all)

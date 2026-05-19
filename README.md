@@ -5,40 +5,131 @@ CARLA 0.9.14 仿真数据自动采集工具。
 ## 快速开始
 
 ```bash
-bash scripts/start_carla.sh    # 启动 CARLA（后台运行）
-python run.py                   # 运行采集（默认 5 秒）
-bash scripts/stop_carla.sh     # 停止 CARLA
+conda activate carla
+python run.py                      # 使用 config/main/default.yaml
+python run.py config/main/other.yaml
 ```
+
+## 后处理可视化
+
+采完数据后，可单独运行后处理生成可视化：
+
+```bash
+# 正常模式：遵循 sensor_layout.yaml 中的 vis 开关
+python tools/npy2jpg.py output/20260519_094603
+
+# 强制全开：忽略所有 vis 开关，生成全部可视化
+python tools/npy2jpg.py output/20260519_094603 --all
+```
+
+适用于采集时关了可视化开关，采完又想看的场景。
+
+## 配置结构
+
+```
+config/
+├── main/
+│   └── default.yaml     # 主配置: CARLA连接、车辆、采集参数、ground_truth
+├── sensor/
+│   └── nuscenes.yaml    # 传感器布局: 每个传感器独立配置
+└── filter/
+    └── default.yaml     # 过滤 LiDAR 配置: annotation 过滤专用
+```
+
+传感器布局中每个相机可独立控制：
+
+```yaml
+sensors:
+  - id: cam_front
+    channel: CAM_FRONT
+    modality: camera_rgb
+    enabled: true
+    depth: true          # 是否采集深度图
+    depth_vis: true      # 是否生成深度可视化
+    semantic: true       # 是否采集语义分割
+    semantic_vis: true   # 是否生成语义可视化
+    annotation_vis: true # 是否生成标注可视化
+    transform: {...}
+    output: {...}
+```
+
+顶层 `trajectory_vis: true` 控制轨迹可视化。
 
 ## 输出结构
 
 ```
-output/<run_id>/
+output/<YYYYMMDD_HHMMSS>/
+├── sensor_layout.yaml        # 传感器布局副本 (供后处理使用)
 ├── CAM_FRONT/
-│   ├── original/         原始 RGB 图像 (.jpg)
-│   ├── depth/        深度图 (.npy, 浮点米制)
-│   ├── depth_viz/    深度可视化 (.png 灰度)
-│   ├── semantic/     语义分割标签 (.png 灰度, tag=0-28)
-│   ├── semantic_viz/ 语义分割可视化 (.png 彩色)
-│   └── annotations/  2D/3D 目标检测真值 (.json)
-├── LIDAR_TOP/
-│   ├── original/         语义激光点云 (.npy, N×6: x,y,z,cos,tag,idx)
-│   └── annotations/  3D 目标真值 (.json)
-├── GNSS/data.csv     全球定位
-├── IMU/data.csv      惯性测量
-├── OCC_GT/           3D 语义占用栅格 (.npy)
-├── OCC_GT_viz/       OCC 俯视可视化 (.png)
-└── ego_trajectory.csv 自车轨迹
+│   ├── original/             # RGB 图像 (.npy → .jpg)
+│   ├── depth/                # 深度图 (.npy, 米制浮点)
+│   ├── depth_viz/            # 深度可视化 (.png 灰度)
+│   ├── semantic/             # 语义分割标签 (.png, tag 0-28)
+│   ├── semantic_viz/         # 语义可视化 (.png 彩色)
+│   ├── annotations/          # 2D/3D 标注 (.json)
+│   └── annotations_viz/      # 标注可视化 (.jpg, 2D 框绘于原图)
+├── LIDAR_TOP/                # 数据 LiDAR (传感器布局中配置)
+│   ├── original/             # 点云 (.npy, N×4 或 N×6)
+│   ├── annotations/          # 3D 标注 (.json, ego 坐标系)
+│   └── annotations_viz/      # BEV 标注可视化 (.png)
+├── LIDAR_FILTER/             # 过滤 LiDAR (output: true 时出现)
+│   ├── original/             # 点云 (.npy)
+│   ├── annotations/          # 3D 标注 (.json)
+│   └── annotations_viz/      # BEV 可视化 (.png)
+├── TRAJ/
+│   ├── ego_trajectory.csv    # 自车轨迹
+│   └── trajectory_viz/       # 轨迹 BEV 可视化 (.png)
+├── GNSS/data.csv             # 全球定位 (lat/lon/alt)
+├── IMU/data.csv              # 惯性测量 (加速度/角速度/罗盘)
+├── OCC_GT/                   # 3D 占用栅格 (.npy)
+└── OCC_GT_viz/               # OCC BEV 可视化 (.png)
 ```
 
-## 配置
+## 坐标系
 
-主配置：`config/main/default.yaml`，传感器布局：`config/sensor/nuscenes.yaml`。
+统一使用 **前-X / 左-Y / 上-Z** 左手坐标系。
 
-```bash
-python run.py                          # 使用默认配置
-python run.py config/main/other.yaml   # 使用其他主配置
-```
+### 各数据坐标系速查
+
+| 数据 | X | Y | Z | roll(+) | pitch(+) | yaw(+) | 原点 |
+|------|---|---|---|---------|---------|--------|------|
+| LiDAR 点云 | 前 | 左 | 上 | — | — | — | LiDAR传感器 |
+| LiDAR 标注 | 前 | 左 | 上 | 左翼下沉 | 抬头 | 机头左转 | 自车 |
+| CAM 标注 (world) | 前 | 右(CARLA) | 上 | 右翼下沉(CARLA) | 抬头 | 机头右转(CARLA) | CARLA世界 |
+| CAM 标注 (camera) | 前 | 左 | 上 | 左翼下沉(相对) | 抬头(相对) | 机头左转(相对) | 相机 |
+| ego_trajectory | 前 | 左 | 上 | 左翼下沉 | 抬头 | 机头左转 | CARLA世界 |
+| IMU accel | 前 | 左 | 上 | — | — | — | 车体 |
+| IMU gyro | 前(左滚+) | 左(抬头+) | 上(左转+) | — | — | — | 车体 |
+| GNSS | — | — | — | — | — | — | WGS84 |
+
+### CARLA 世界 → 本系统变换
+
+CARLA (Unreal) 原始坐标系: X=前, Y=**右**, Z=上, roll=右翼下沉, yaw=机头右转 (右手系)
+
+变换规则: **Y 取负, roll 取负, yaw 取负, pitch 不变**
+
+### 标注 location 说明
+
+- **动态 actor**: `location.z` = 几何中心 (pivot地面 + half_height)
+- **静态 BBs**: `location.z` = 几何中心 (`bb.location.z`)
+- **相机帧 Z**: `loc_world.z - cam.z + bbox_height/2` = 几何中心相对相机
+
+### bbox_3d 格式
+
+`{"x": full_length, "y": full_width, "z": full_height}` — 完整尺寸 (extent × 2)
+
+### bbox_2d 格式 (仅相机标注)
+
+`[x_min, y_min, x_max, y_max]` — 图像像素坐标, 左上角为原点
+
+## 标注过滤
+
+通过专用过滤 LiDAR (`config/filter/default.yaml`) 对 bbox 进行点云计数过滤:
+
+- bbox 内 LiDAR 点数 < `min_points` (默认 10) → 丢弃
+- 仅检查 XY 平面 (不计 Z)
+- 过滤 LiDAR 独立于传感器布局, 不消耗数据 LiDAR 资源
+- `output: true` 时同时输出该 LiDAR 的点云和标注
 
 ## 语义标签颜色对照
 

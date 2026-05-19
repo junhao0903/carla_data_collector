@@ -1,0 +1,26 @@
+# Annotation filter LiDAR — spawned independently of sensor layout
+# Used for filtering bbox annotations by point count
+
+enabled: true
+blueprint: sensor.lidar.ray_cast
+rate_hz: 20          # must match or exceed world FPS
+
+channels: 128
+range: 200
+points_per_second: 3200000
+rotation_frequency: 20
+
+upper_fov: 10
+lower_fov: -30
+horizontal_fov: 360
+
+transform:           # mount position relative to ego vehicle
+  x: 0.0
+  y: 0.0
+  z: 1.8
+  roll: 0.0
+  pitch: 0.0
+  yaw: 0.0
+
+output: false        # 是否输出点云数据到 output 目录 (含可视化)
+min_points: 10       # bbox with fewer points is discarded

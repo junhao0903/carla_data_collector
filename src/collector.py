@@ -72,14 +72,20 @@ class DataCollector:
         print("Vehicle moving, starting collection")
 
         self._output_dir = self._make_output_dir()
+        # Save sensor layout for post-processing (contains vis flags)
+        import yaml as _yaml
+        with open(os.path.join(self._output_dir, "sensor_layout.yaml"), "w") as _f:
+            _yaml.dump(self._config.get("_sensor_layout", {}), _f)
         print(f"Saving data to {self._output_dir}")
 
-        self._ego_csv = os.path.join(self._output_dir, "ego_trajectory.csv")
+        traj_dir = os.path.join(self._output_dir, "TRAJ")
+        os.makedirs(traj_dir, exist_ok=True)
+        self._ego_csv = os.path.join(traj_dir, "ego_trajectory.csv")
         self._ego_f = open(self._ego_csv, "w", newline="")
         import csv as csv_module
         self._ego_writer = csv_module.writer(self._ego_f)
-        self._ego_writer.writerow(["frame", "x", "y", "z", "roll", "pitch", "yaw",
-                                    "cam_x", "cam_y", "cam_z", "cam_roll", "cam_pitch", "cam_yaw"])
+        self._ego_writer.writerow(["frame", "x", "y_left", "z", "roll_left", "pitch", "yaw_left",
+                                    "cam_x", "cam_y_left", "cam_z", "cam_roll_left", "cam_pitch", "cam_yaw_left"])
 
         from .sensors import attach_sensors
         sensor_layout = self._build_sensor_layout(fps)
@@ -100,6 +106,16 @@ class DataCollector:
             sensor_id = spec["id"]
             if sensor_id in self._sensors:
                 self._rgb_sensors[spec["channel"]] = self._sensors[sensor_id]
+
+        # Spawn dedicated filter LiDAR if configured (independent of sensor layout)
+        self._filter_lidar = None
+        self._filter_lidar_channel = "__filter__"
+        self._filter_min_pts = 10
+        filter_cfg = self._config.get("_filter_config", {})
+        if filter_cfg.get("enabled", True):
+            self._setup_filter_lidar(self._world, bp_lib, self._vehicle, filter_cfg)
+            self._filter_min_pts = filter_cfg.get("min_points", 10)
+
         self._init_annotations()
         print(f"Attached sensors: {', '.join(self._sensors.keys())}")
 
@@ -125,45 +141,78 @@ class DataCollector:
 
         self._convert_npy_to_jpg()
 
+    def _setup_filter_lidar(self, world, bp_lib, vehicle, cfg):
+        bp = bp_lib.find(cfg.get("blueprint", "sensor.lidar.ray_cast"))
+        bp.set_attribute("channels", str(cfg.get("channels", 64)))
+        bp.set_attribute("range", str(cfg.get("range", 100)))
+        bp.set_attribute("points_per_second", str(cfg.get("points_per_second", 56000)))
+        bp.set_attribute("rotation_frequency", str(cfg.get("rotation_frequency", 10)))
+        rate = cfg.get("rate_hz", 20)
+        bp.set_attribute("sensor_tick", str(1.0 / rate))
+
+        from .sensors import _make_transform
+        transform = _make_transform(cfg.get("transform", {}))
+        sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
+
+        from .sensors import _sensor_data, _sensor_frames
+        channel = self._filter_lidar_channel
+
+        save_dir = None
+        if cfg.get("output", False):
+            save_dir = os.path.join(self._output_dir, "LIDAR_FILTER", "original")
+            os.makedirs(save_dir, exist_ok=True)
+
+        def _filter_lidar_cb(data):
+            _sensor_frames[channel] = data.frame
+            points = np.frombuffer(data.raw_data, dtype=np.float32).copy()
+            points = points.reshape((-1, 4))
+            points[:, 1] = -points[:, 1]
+            _sensor_data[channel] = points
+            if save_dir is not None:
+                np.save(os.path.join(save_dir, f"{data.frame:08d}.npy"), points)
+
+        sensor.listen(_filter_lidar_cb)
+        self._filter_lidar = sensor
+        self._sensors["__filter_lidar__"] = sensor
+        if save_dir is not None:
+            self._lidar_sensors["LIDAR_FILTER"] = sensor
+
     def _build_sensor_layout(self, world_fps):
         layout = self._config.get("_sensor_layout", {})
         sensors = list(layout.get("sensors", []))
-        gt = self._config.get("ground_truth", {})
 
         # Auto-tag sensors with subdir for grouped output (skip pseudo-sensors)
         for s in sensors:
             if s.get("modality") in ("camera_rgb", "lidar", "lidar_semantic"):
                 s.setdefault("subdir", "original")
 
-        if gt.get("depth", True):
-            for s in layout.get("sensors", []):
-                if s.get("modality") == "camera_rgb" and s.get("enabled", True):
-                    sensors.append({
-                        "id": s["id"] + "_depth",
-                        "channel": s["channel"],
-                        "subdir": "depth",
-                        "modality": "camera_depth",
-                        "blueprint": "sensor.camera.depth",
-                        "enabled": True,
-                        "rate_hz": s.get("rate_hz", world_fps),
-                        "transform": s.get("transform", {}),
-                        "output": s.get("output", {}),
-                    })
-
-        if gt.get("semantic_camera", True):
-            for s in layout.get("sensors", []):
-                if s.get("modality") == "camera_rgb" and s.get("enabled", True):
-                    sensors.append({
-                        "id": s["id"] + "_semantic",
-                        "channel": s["channel"],
-                        "subdir": "semantic",
-                        "modality": "camera_semantic",
-                        "blueprint": "sensor.camera.semantic_segmentation",
-                        "enabled": True,
-                        "rate_hz": s.get("rate_hz", world_fps),
-                        "transform": s.get("transform", {}),
-                        "output": s.get("output", {}),
-                    })
+        for s in layout.get("sensors", []):
+            if s.get("modality") != "camera_rgb" or not s.get("enabled", True):
+                continue
+            if s.get("depth", True):
+                sensors.append({
+                    "id": s["id"] + "_depth",
+                    "channel": s["channel"],
+                    "subdir": "depth",
+                    "modality": "camera_depth",
+                    "blueprint": "sensor.camera.depth",
+                    "enabled": True,
+                    "rate_hz": s.get("rate_hz", world_fps),
+                    "transform": s.get("transform", {}),
+                    "output": s.get("output", {}),
+                })
+            if s.get("semantic", True):
+                sensors.append({
+                    "id": s["id"] + "_semantic",
+                    "channel": s["channel"],
+                    "subdir": "semantic",
+                    "modality": "camera_semantic",
+                    "blueprint": "sensor.camera.semantic_segmentation",
+                    "enabled": True,
+                    "rate_hz": s.get("rate_hz", world_fps),
+                    "transform": s.get("transform", {}),
+                    "output": s.get("output", {}),
+                })
 
         return {"sensors": sensors}
 
@@ -184,6 +233,12 @@ class DataCollector:
             ann_dir = os.path.join(self._output_dir, channel, "annotations")
             os.makedirs(ann_dir, exist_ok=True)
 
+        if self._filter_lidar is not None:
+            filter_cfg = self._config.get("_filter_config", {})
+            if filter_cfg.get("output", False):
+                ann_dir = os.path.join(self._output_dir, "LIDAR_FILTER", "annotations")
+                os.makedirs(ann_dir, exist_ok=True)
+
         if self._occ_spec is not None:
             from .sensors import _sensor_output_dir
             self._occ_save_dir = _sensor_output_dir(self._output_dir, self._occ_spec)
@@ -195,7 +250,30 @@ class DataCollector:
             self._occ_save_dir = None  # OCC generated in post-processing
 
     def _write_annotations_for_new_frames(self):
-        from .sensors import get_sensor_frames
+        from .sensors import get_sensor_frames, get_sensor_data
+
+        # Snapshot lidar data once to avoid race with callback threads
+        # Prefer dedicated filter LiDAR, fall back to data-collection LiDARs
+        lidar_points = None
+        min_pts = self._filter_min_pts
+        ego_tf = self._vehicle.get_transform()
+        lidar_tf = None
+        if min_pts > 0:
+            pts = get_sensor_data().get(self._filter_lidar_channel)
+            if pts is not None:
+                lidar_points = pts
+                if self._filter_lidar and self._filter_lidar.is_alive:
+                    lidar_tf = self._filter_lidar.get_transform()
+            else:
+                for lidar_spec in self._lidar_specs:
+                    ch = lidar_spec["channel"]
+                    pts = get_sensor_data().get(ch)
+                    if pts is not None:
+                        lidar_points = pts
+                        sensor = self._lidar_sensors.get(ch)
+                        if sensor and sensor.is_alive:
+                            lidar_tf = sensor.get_transform()
+                        break
 
         for spec in self._camera_specs:
             channel = spec["channel"]
@@ -207,7 +285,15 @@ class DataCollector:
             )
             if os.path.exists(ann_path):
                 continue
-            self._write_annotations(frame, spec, channel, ann_path)
+            # Only use lidar filter if lidar frame is close to camera frame
+            lidar_frame = get_sensor_frames().get(self._filter_lidar_channel)
+            if lidar_frame is None and self._lidar_specs:
+                lidar_frame = get_sensor_frames().get(self._lidar_specs[0]["channel"])
+            if lidar_frame is not None and abs(lidar_frame - frame) <= 2:
+                lp, mp = lidar_points, min_pts
+            else:
+                lp, mp = None, 0
+            self._write_annotations(frame, spec, channel, ann_path, lp, mp, ego_tf, lidar_tf)
 
         for spec in self._lidar_specs:
             channel = spec["channel"]
@@ -218,9 +304,77 @@ class DataCollector:
             ann_path = os.path.join(ann_dir, f"{frame:08d}.json")
             if os.path.exists(ann_path):
                 continue
-            self._write_lidar_annotations(ann_path, channel, spec)
+            self._write_lidar_annotations(ann_path, channel, spec, frame, lidar_points, min_pts, ego_tf, lidar_tf)
 
-    def _write_annotations(self, frame, spec, channel, ann_path):
+        # Write filter LiDAR annotations if output enabled
+        if self._filter_lidar is not None and self._config.get("_filter_config", {}).get("output", False):
+            filter_frame = get_sensor_frames().get(self._filter_lidar_channel)
+            if filter_frame is not None:
+                ann_dir = os.path.join(self._output_dir, "LIDAR_FILTER", "annotations")
+                ann_path = os.path.join(ann_dir, f"{filter_frame:08d}.json")
+                if not os.path.exists(ann_path):
+                    filter_cfg = self._config.get("_filter_config", {})
+                    filter_spec = {
+                        "channel": "LIDAR_FILTER",
+                        "output": {
+                            "range": filter_cfg.get("range", 100),
+                            "upper_fov": filter_cfg.get("upper_fov", 10),
+                            "lower_fov": filter_cfg.get("lower_fov", -30),
+                            "horizontal_fov": filter_cfg.get("horizontal_fov", 360),
+                        }
+                    }
+                    self._write_lidar_annotations(ann_path, "LIDAR_FILTER", filter_spec,
+                                                  filter_frame, lidar_points, min_pts, ego_tf, lidar_tf)
+
+    @staticmethod
+    def _count_points_in_actor_bbox(points, actor, ego_tf, lidar_tf):
+        """points in lidar local frame (Y flipped to left). Count XY points inside actor bbox."""
+        # Actor bbox center in CARLA world
+        bbox = actor.bounding_box
+        t = actor.get_transform()
+        ayaw = math.radians(t.rotation.yaw)
+        acos, asin = math.cos(ayaw), math.sin(ayaw)
+        bbl = bbox.location
+        cx_w = t.location.x + bbl.x * acos - bbl.y * asin
+        cy_w = t.location.y + bbl.x * asin + bbl.y * acos
+        ex, ey = bbox.extent.x, bbox.extent.y
+
+        # Convert actor center to ego vehicle local frame (forward/right/up)
+        eyaw = math.radians(ego_tf.rotation.yaw)
+        ecos, esin = math.cos(eyaw), math.sin(eyaw)
+        dx_w = cx_w - ego_tf.location.x
+        dy_w = cy_w - ego_tf.location.y
+        cx_ego = dx_w * ecos + dy_w * esin
+        cy_ego = -dx_w * esin + dy_w * ecos  # CARLA Y=right in ego frame
+
+        # LiDAR mount transform in ego frame (assume rotation=0, only Z offset matters)
+        lidar_z_offset = lidar_tf.location.z - ego_tf.location.z if lidar_tf else 0.0
+
+        # LiDAR points in ego frame: points[:,0]=forward, points[:,1]=left (flipped), points[:,2]=up
+        # Remove LiDAR Z offset to align with ego origin
+        px_ego = points[:, 0]  # forward (same as ego X)
+        py_ego = points[:, 1]  # left (flipped from CARLA right. Ego right = -left)
+        pz_ego = points[:, 2] - lidar_z_offset
+
+        # Actor center in ego frame with Y=left convention (matching flipped lidar Y)
+        cy_ego_left = -cy_ego  # CARLA right → left
+
+        # Vector from actor center to points in ego frame (Y=left)
+        dx = px_ego - cx_ego
+        dy = py_ego - cy_ego_left
+
+        # Actor yaw in ego frame
+        actor_yaw_ego = ayaw - eyaw
+        acos2, asin2 = math.cos(actor_yaw_ego), math.sin(actor_yaw_ego)
+
+        # Rotate to actor local frame
+        lx = dx * acos2 + dy * asin2
+        ly = -dx * asin2 + dy * acos2
+
+        inside = (np.abs(lx) <= ex) & (np.abs(ly) <= ey)
+        return int(inside.sum())
+
+    def _write_annotations(self, frame, spec, channel, ann_path, lidar_points, min_pts, ego_tf, lidar_tf):
         actors = list(self._world.get_actors())
         annotations = []
         ego_id = self._vehicle.id
@@ -237,6 +391,9 @@ class DataCollector:
                 else:
                     continue
 
+                if lidar_points is not None and self._count_points_in_actor_bbox(lidar_points, actor, ego_tf, lidar_tf) < min_pts:
+                    continue
+
                 bbox = actor.bounding_box.extent
                 transform = actor.get_transform()
                 velocity = actor.get_velocity()
@@ -245,7 +402,7 @@ class DataCollector:
                     "category": category,
                     "type_id": type_id,
                     "bbox_3d": {
-                        "x": float(bbox.x), "y": float(bbox.y), "z": float(bbox.z),
+                        "x": float(bbox.x * 2), "y": float(bbox.y * 2), "z": float(bbox.z * 2),
                     },
                     "location": {
                         "x": float(transform.location.x),
@@ -253,7 +410,7 @@ class DataCollector:
                         "z": float(transform.location.z),
                     },
                     "rotation": {
-                        "roll": float(transform.rotation.roll),
+                        "roll": -float(transform.rotation.roll),
                         "pitch": float(transform.rotation.pitch),
                         "yaw": float(transform.rotation.yaw),
                     },
@@ -266,21 +423,112 @@ class DataCollector:
             except RuntimeError:
                 continue
 
+        # Add static level vehicles (skip if overlapping with dynamic actors)
+        dynamic_locs = []
+        for a in annotations:
+            dynamic_locs.append((a["location"]["x"], a["location"]["y"]))
+
+        label_map = {
+            self._server.carla.CityObjectLabel.Car: "static_car",
+            self._server.carla.CityObjectLabel.Truck: "static_truck",
+            self._server.carla.CityObjectLabel.Bus: "static_bus",
+            self._server.carla.CityObjectLabel.Train: "static_train",
+            self._server.carla.CityObjectLabel.Motorcycle: "static_motorcycle",
+            self._server.carla.CityObjectLabel.Bicycle: "static_bicycle",
+            self._server.carla.CityObjectLabel.Pedestrians: "static_pedestrian",
+        }
+        for label, cat in label_map.items():
+            try:
+                bbs = self._world.get_level_bbs(label)
+            except RuntimeError:
+                continue
+            for bb in bbs:
+                # Skip if overlaps with any dynamic actor
+                bx, by = bb.location.x, bb.location.y
+                overlap = False
+                for dx, dy in dynamic_locs:
+                    if abs(bx - dx) < 3.0 and abs(by - dy) < 3.0:
+                        overlap = True
+                        break
+                if overlap:
+                    continue
+                if lidar_points is not None:
+                    hx, hy = bb.extent.x, bb.extent.y
+                    eyaw = math.radians(ego_tf.rotation.yaw)
+                    ecos, esin = math.cos(eyaw), math.sin(eyaw)
+                    dx_w = bb.location.x - ego_tf.location.x
+                    dy_w = bb.location.y - ego_tf.location.y
+                    cx_ego = dx_w * ecos + dy_w * esin
+                    cy_ego = -dx_w * esin + dy_w * ecos
+                    cy_ego_left = -cy_ego
+                    n_static = int(((np.abs(lidar_points[:, 0] - cx_ego) <= hx) & \
+                                    (np.abs(lidar_points[:, 1] - cy_ego_left) <= hy)).sum())
+                    if n_static < min_pts:
+                        continue
+                annotations.append({
+                    "actor_id": -1,
+                    "category": cat,
+                    "type_id": str(label).split('.')[-1],
+                    "bbox_3d": {
+                        "x": float(bb.extent.x * 2),
+                        "y": float(bb.extent.y * 2),
+                        "z": float(bb.extent.z * 2),
+                    },
+                    "location": {"x": bb.location.x, "y": bb.location.y, "z": bb.location.z - bb.extent.z},
+                    "rotation": {"roll": -float(bb.rotation.roll), "pitch": float(bb.rotation.pitch), "yaw": float(bb.rotation.yaw)},
+                    "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
+                })
+
         cam_transform = self._get_camera_world_transform(channel)
         K = self._frame_annotations[channel]["intrinsic"]
 
         bboxes_2d = []
         for ann in annotations:
             bbox_2d = self._project_bbox(ann, cam_transform, spec, K)
-            if bbox_2d is not None:
+            bw = bbox_2d[2] - bbox_2d[0] if bbox_2d else 0
+            bh = bbox_2d[3] - bbox_2d[1] if bbox_2d else 0
+            img_area = K["width"] * K["height"]
+            img_short = min(K["width"], K["height"])
+            tiny = (bw < 16 and bh < 16)
+            low_ratio = (bw * bh) / img_area < 0.0001
+            thin = max(bw, bh) < img_short / 50
+            # Theoretical projection size vs actual: discard truncated bboxes
+            loc_w = ann["location"]
+            ext_w = ann["bbox_3d"]
+            dx_w = loc_w["x"] - cam_transform.location.x
+            dy_w = loc_w["y"] - cam_transform.location.y
+            dz_w = (loc_w["z"] + ext_w["z"] / 2) - cam_transform.location.z
+            dist = math.sqrt(dx_w*dx_w + dy_w*dy_w + dz_w*dz_w)
+            expected_w = K["fx"] * ext_w["y"] / max(dist, 0.1)   # width in image (Y axis → u)
+            expected_h = K["fy"] * ext_w["z"] / max(dist, 0.1)   # height in image
+            expected_area = expected_w * expected_h
+            truncated = (bw * bh) < expected_area * 0.3 if expected_area > 0 else True
+            if bbox_2d is not None and not (tiny or low_ratio or thin or truncated):
                 ann_with_2d = dict(ann)
                 ann_with_2d["bbox_2d"] = bbox_2d
+                # Convert location/rotation to camera frame
+                loc_world = ann["location"]
+                rot_world = ann["rotation"]
+                cam_loc = cam_transform.location
+                cam_rot = cam_transform.rotation
+                cam_yaw = math.radians(cam_rot.yaw)
+                cy, sy = math.cos(cam_yaw), math.sin(cam_yaw)
+                dx = loc_world["x"] - cam_loc.x
+                dy = loc_world["y"] - cam_loc.y
+                ann_with_2d["location"] = {
+                    "x": cy*dx + sy*dy,
+                    "y": -(-sy*dx + cy*dy),   # Y=left (standard)
+                    "z": loc_world["z"] - cam_loc.z + ann["bbox_3d"]["z"] / 2,  # geometric center
+                }
+                ann_with_2d["rotation"]["roll"] = rot_world["roll"] + cam_rot.roll    # 左系相对相机
+                ann_with_2d["rotation"]["pitch"] = rot_world["pitch"] - cam_rot.pitch
+                ann_with_2d["rotation"]["yaw"] = -(rot_world["yaw"] - cam_rot.yaw)  # 左系, yaw取反
                 bboxes_2d.append(ann_with_2d)
 
         with open(ann_path, "w") as f:
             json.dump(bboxes_2d, f)
 
-    def _write_lidar_annotations(self, ann_path, channel, spec):
+    def _write_lidar_annotations(self, ann_path, channel, spec, frame, lidar_points, min_pts, ego_tf, lidar_tf):
         lidar_transform = self._lidar_sensors.get(channel)
         if lidar_transform is None or not lidar_transform.is_alive:
             return
@@ -307,10 +555,13 @@ class DataCollector:
                 else:
                     continue
 
+                if lidar_points is not None and self._count_points_in_actor_bbox(lidar_points, actor, ego_tf, lidar_tf) < min_pts:
+                    continue
+
                 # Build 8 corners of 3D bbox in world coordinates
-                bbox = actor.bounding_box.extent
+                bbox = actor.bounding_box.extent  # half-extent
                 t = actor.get_transform()
-                dx, dy, dz = bbox.x / 2, bbox.y / 2, bbox.z / 2
+                dx, dy, dz = bbox.x, bbox.y, bbox.z  # half-extent IS the corner offset
                 corners_local = np.array([
                     [ dx,  dy,  dz], [ dx,  dy, -dz], [ dx, -dy,  dz], [ dx, -dy, -dz],
                     [-dx,  dy,  dz], [-dx,  dy, -dz], [-dx, -dy,  dz], [-dx, -dy, -dz],
@@ -340,22 +591,29 @@ class DataCollector:
                     continue
 
                 velocity = actor.get_velocity()
+                loc = t.location
+                rot = t.rotation
+                # Convert to ego frame (use snapshotted ego_tf)
+                eyaw = math.radians(ego_tf.rotation.yaw)
+                cy, sy = math.cos(eyaw), math.sin(eyaw)
+                dx = loc.x - ego_tf.location.x
+                dy = loc.y - ego_tf.location.y
                 annotations.append({
                     "actor_id": int(actor.id),
                     "category": category,
                     "type_id": type_id,
                     "bbox_3d": {
-                        "x": float(bbox.x), "y": float(bbox.y), "z": float(bbox.z),
+                        "x": float(bbox.x * 2), "y": float(bbox.y * 2), "z": float(bbox.z * 2),
                     },
                     "location": {
-                        "x": float(t.location.x),
-                        "y": float(t.location.y),
-                        "z": float(t.location.z),
+                        "x": cy*dx + sy*dy,   # forward in ego
+                        "y": -(-sy*dx + cy*dy),   # Y=left (standard)
+                        "z": float(loc.z - ego_tf.location.z + bbox.z),  # geometric center (bbox.z=half-extent)
                     },
                     "rotation": {
-                        "roll": float(t.rotation.roll),
-                        "pitch": float(t.rotation.pitch),
-                        "yaw": float(t.rotation.yaw),
+                        "roll": -float(rot.roll),
+                        "pitch": float(rot.pitch),
+                        "yaw": -float(rot.yaw - ego_tf.rotation.yaw),  # Y=左, yaw取反
                     },
                     "velocity": {
                         "x": float(velocity.x),
@@ -365,6 +623,80 @@ class DataCollector:
                 })
             except RuntimeError:
                 continue
+
+        # Add static level vehicles (get_level_bbs), FOV-filtered
+        eyaw = math.radians(ego_tf.rotation.yaw)
+        cy, sy = math.cos(eyaw), math.sin(eyaw)
+        label_map = {
+            self._server.carla.CityObjectLabel.Car: "static_car",
+            self._server.carla.CityObjectLabel.Truck: "static_truck",
+            self._server.carla.CityObjectLabel.Bus: "static_bus",
+            self._server.carla.CityObjectLabel.Train: "static_train",
+            self._server.carla.CityObjectLabel.Motorcycle: "static_motorcycle",
+            self._server.carla.CityObjectLabel.Bicycle: "static_bicycle",
+            self._server.carla.CityObjectLabel.Pedestrians: "static_pedestrian",
+        }
+        for label, cat in label_map.items():
+            try:
+                bbs = self._world.get_level_bbs(label)
+            except RuntimeError:
+                continue
+            for bb in bbs:
+                # Skip if overlaps with any dynamic actor (both in world coords)
+                bx, by = bb.location.x, bb.location.y
+                overlap = False
+                for actor in actors:
+                    aloc = actor.get_transform().location
+                    if abs(bx - aloc.x) < 3.0 and abs(by - aloc.y) < 3.0:
+                        overlap = True; break
+                if overlap: continue
+                hx, hy, hz = bb.extent.x, bb.extent.y, bb.extent.z
+                if lidar_points is not None and ego_tf is not None:
+                    eyaw_s = math.radians(ego_tf.rotation.yaw)
+                    ecos_s, esin_s = math.cos(eyaw_s), math.sin(eyaw_s)
+                    dx_ws = bb.location.x - ego_tf.location.x
+                    dy_ws = bb.location.y - ego_tf.location.y
+                    cx_egos = dx_ws * ecos_s + dy_ws * esin_s
+                    cy_egos = -dx_ws * esin_s + dy_ws * ecos_s
+                    cy_ego_ls = -cy_egos
+                    n_static = int(((np.abs(lidar_points[:, 0] - cx_egos) <= hx) & \
+                                    (np.abs(lidar_points[:, 1] - cy_ego_ls) <= hy)).sum())
+                    if n_static < min_pts:
+                        continue
+                # Build 8 corners and check FOV
+                corners = np.array([
+                    [hx,hy,hz],[hx,hy,-hz],[hx,-hy,hz],[hx,-hy,-hz],
+                    [-hx,hy,hz],[-hx,hy,-hz],[-hx,-hy,hz],[-hx,-hy,-hz]
+                ]) + np.array([bb.location.x, bb.location.y, bb.location.z])
+                in_fov = 0
+                for c in corners:
+                    cx, cy_c, cz = c[0]-lidar_loc.x, c[1]-lidar_loc.y, c[2]-lidar_loc.z
+                    d = math.sqrt(cx*cx+cy_c*cy_c+cz*cz)
+                    if d <= lidar_range:
+                        elev = math.asin(cz/d) if d>0.01 else 0
+                        if lower_fov <= elev <= upper_fov:
+                            in_fov += 1
+                if in_fov < 4:
+                    continue
+                dx = bb.location.x - ego_tf.location.x
+                dy = bb.location.y - ego_tf.location.y
+                fw = cy*dx + sy*dy
+                rt = -sy*dx + cy*dy
+                annotations.append({
+                    "actor_id": -1,
+                    "category": cat,
+                    "type_id": str(label).split('.')[-1],
+                    "bbox_3d": {
+                        "x": float(hx * 2), "y": float(hy * 2), "z": float(hz * 2),
+                    },
+                    "location": {
+                        "x": fw, "y": -rt,
+                        "z": float(bb.location.z - ego_tf.location.z),
+                    },
+                    "rotation": {"roll": -float(bb.rotation.roll), "pitch": float(bb.rotation.pitch),
+                                 "yaw": -float(bb.rotation.yaw - ego_tf.rotation.yaw)},
+                    "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
+                })
 
         with open(ann_path, "w") as f:
             json.dump(annotations, f)
@@ -395,7 +727,7 @@ class DataCollector:
         yaw = math.radians(rot["yaw"])
         cos_y, sin_y = math.cos(yaw), math.sin(yaw)
         Rz = np.array([[cos_y, -sin_y, 0], [sin_y, cos_y, 0], [0, 0, 1]])
-        world_corners = (Rz @ corners_local.T).T + np.array([loc["x"], loc["y"], loc["z"]])
+        world_corners = (Rz @ corners_local.T).T + np.array([loc["x"], loc["y"], loc["z"] + ext["z"] / 2])
 
         # World → camera coordinates
         cam_loc = cam_transform.location
@@ -440,6 +772,18 @@ class DataCollector:
 
         u = fx * (Y / X) + cx
         v = fy * (-Z / X) + cy
+
+        # Center of bbox must be in front of camera and not too far outside image
+        center_X = cam_points[0, 0]  # first corner is before Rz rotation... no, all 8 are corners
+        # Compute center: average of 8 corners in camera space
+        center_cam = cam_points.mean(axis=0)
+        cX, cY, cZ = center_cam[0], center_cam[1], center_cam[2]
+        if cX <= 0.1:
+            return None
+        cu = fx * (cY / cX) + cx
+        cv = fy * (-cZ / cX) + cy
+        if cu < -w or cu > 2 * w or cv < -h or cv > 2 * h:
+            return None
 
         # At least one corner should be in or near the image
         in_view = (u >= -w * 0.5) & (u < w * 1.5) & (v >= -h * 0.5) & (v < h * 1.5)
@@ -490,6 +834,7 @@ class DataCollector:
     def _spawn_npc_vehicles(self, world, bp_lib, tm, ego_vehicle):
         traffic_cfg = self._config.get("traffic", {})
         target = traffic_cfg.get("vehicle_count", 10)
+        # Log all spawned NPC blueprints
         min_count = traffic_cfg.get("min_vehicle_count", 0)
         seed = traffic_cfg.get("npc_seed", 42)
 
@@ -632,14 +977,14 @@ class DataCollector:
 
     def _record_ego_pose(self, frame):
         ego_t = self._vehicle.get_transform()
-        row = [frame, ego_t.location.x, ego_t.location.y, ego_t.location.z,
-               ego_t.rotation.roll, ego_t.rotation.pitch, ego_t.rotation.yaw]
+        row = [frame, ego_t.location.x, -ego_t.location.y, ego_t.location.z,
+               -ego_t.rotation.roll, ego_t.rotation.pitch, -ego_t.rotation.yaw]
         for spec in self._camera_specs:
             sensor = self._rgb_sensors.get(spec["channel"])
             if sensor and sensor.is_alive:
                 ct = sensor.get_transform()
-                row += [ct.location.x, ct.location.y, ct.location.z,
-                        ct.rotation.roll, ct.rotation.pitch, ct.rotation.yaw]
+                row += [ct.location.x, -ct.location.y, ct.location.z,
+                        -ct.rotation.roll, ct.rotation.pitch, -ct.rotation.yaw]
         self._ego_writer.writerow(row)
 
     def _convert_npy_to_jpg(self):
@@ -674,7 +1019,7 @@ class DataCollector:
                 annotations.append({
                     "category": category,
                     "bbox_3d": {
-                        "x": float(bbox.x), "y": float(bbox.y), "z": float(bbox.z),
+                        "x": float(bbox.x * 2), "y": float(bbox.y * 2), "z": float(bbox.z * 2),
                     },
                     "location": {
                         "x": float(t.location.x),

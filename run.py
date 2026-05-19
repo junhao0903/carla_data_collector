@@ -20,6 +20,16 @@ def load_config(config_path):
         with open(layout_path, "r") as f:
             config["_sensor_layout"] = yaml.safe_load(f)
 
+    filter_path = config.get("ground_truth", {}).get("annotation_filter")
+    if filter_path:
+        if not os.path.isabs(filter_path):
+            if "/" not in filter_path:
+                filter_path = os.path.join("config", "filter", filter_path)
+            else:
+                filter_path = os.path.join(os.path.dirname(config_path), filter_path)
+        with open(filter_path, "r") as f:
+            config["_filter_config"] = yaml.safe_load(f)
+
     return config
 
 

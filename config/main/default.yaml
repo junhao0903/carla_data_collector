@@ -24,7 +24,7 @@ traffic:
 
 collection:
   output_dir: output       # 数据输出根目录
-  duration_seconds: 5      # 采集时长 (秒), 0 = 不限时, Ctrl+C 退出
+  duration_seconds: 10      # 采集时长 (秒), 0 = 不限时, Ctrl+C 退出
   synchronous: true        # 同步模式 (建议开启, 保证数据帧率稳定)
   warmup_ticks: 10         # 预热 ticks (传感器稳定期, 不记录数据)
   motion_speed_kmh: 5       # 车速达到此值 (km/h) 开始采集
@@ -32,8 +32,6 @@ collection:
   motion_timeout_ticks: 500     # 等待加速的最大 tick 数
 
 ground_truth:
-  detection_2d: true
-  depth: true
-  semantic_camera: true
+  annotation_filter: default.yaml    # LiDAR 配置 (config/filter/), 用于过滤无效 annotation
 
 sensor_layout: nuscenes.yaml  # 传感器布局文件 (自动查找 config/sensor/ 目录)
