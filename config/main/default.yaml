@@ -5,7 +5,7 @@ carla:
   host: 127.0.0.1          # CARLA 服务地址
   port: 2000               # CARLA RPC 端口
   timeout_seconds: 60.0    # 客户端超时 (nuscenes 6相机+LiDAR 需较大值)
-  town: Town10HD             # 要加载的地图 (Town01–Town07, Town10HD)
+  map: Town10HD             # 要加载的地图 (Town01–Town07, Town10HD)
   weather: ClearNoon       # 天气预设 (ClearNoon, CloudyNoon, HardRainNoon, WetSunset...)
   fps: 20                  # 同步模式下的仿真帧率
   auto_launch: false       # 不在 run.py 中启动 CARLA (推荐手动启动后直连)
