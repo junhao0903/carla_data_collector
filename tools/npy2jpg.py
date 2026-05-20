@@ -63,7 +63,7 @@ def convert_run(run_dir, quality=95, force_all=False):
     _convert_orin(run_dir, quality)
     _depth_visualization(run_dir, layout, quality, force_all)
     _semantic_visualization(run_dir, layout, force_all)
-    _generate_occ(run_dir)
+    _generate_occ(run_dir, layout, force_all)
     _annotation_visualization(run_dir, layout, force_all)
     _trajectory_visualization(run_dir, layout, force_all)
 
@@ -112,7 +112,16 @@ def _depth_visualization(run_dir, layout, quality, force_all=False):
 # ========== OCC Post-Processing ==========
 
 def _load_grid_params(run_dir):
-    occ_dir = os.path.join(run_dir, "OCC_GT")
+    # Try new metadata format first (OCC/occ_metadata.json)
+    new_meta = os.path.join(run_dir, "OCC", "occ_metadata.json")
+    if os.path.exists(new_meta):
+        with open(new_meta) as f:
+            cfg = json.load(f)
+        pc = cfg.get("pc_range", [-50, -50, -5, 50, 50, 3])
+        vs = cfg.get("voxel_size", [0.5, 0.5, 0.5])
+        return (pc[0], pc[3], pc[1], pc[4], pc[2], pc[5], vs[0])
+    # Fall back to old grid_config.json
+    occ_dir = os.path.join(run_dir, "OCC")
     cfg_path = os.path.join(occ_dir, "grid_config.json")
     if os.path.exists(cfg_path):
         with open(cfg_path) as f:
@@ -409,53 +418,165 @@ def _lidar_annotation_viz(run_dir, layout, force_all=False):
             pil_img.save(os.path.join(ann_viz_dir, f"{frame_str}.png"))
 
 
-def _generate_occ(run_dir):
-    """Post-process: generate OCC from LiDAR + actor annotations."""
+def _generate_gt_occ(run_dir, ann_dir, ego_csv, meta_path):
+    """Generate OCC npy files from GT annotations + static_occ. Saves to OCC/original/."""
+    import csv as _csv
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from src.occ_generator import build_frame_occ, PC_RANGE, VOXEL_SIZE, OCC_SHAPE
+
+    with open(meta_path) as f:
+        meta = json.load(f)
+    pc_range = meta.get("pc_range", PC_RANGE)
+    voxel_size = meta.get("voxel_size", VOXEL_SIZE)
+    occ_shape = [int(round((pc_range[3]-pc_range[0])/voxel_size[0])),
+                 int(round((pc_range[4]-pc_range[1])/voxel_size[1])),
+                 int(round((pc_range[5]-pc_range[2])/voxel_size[2]))]
+
+    static_dir = meta.get("static_occ_dir", "map")
+    town = meta.get("map", "Town10HD")
+    static_path = os.path.join(static_dir, f"{town}_static_occ.npy")
+    if not os.path.exists(static_path):
+        print(f"  Static OCC not found at {static_path}, skipping GT OCC generation")
+        return
+    static_occ = np.load(static_path)
+    with open(static_path.replace(".npy", ".json")) as f:
+        static_pc_range = json.load(f)["pc_range"]
+
+    # Load ego poses (left-hand CSV → CARLA world)
+    ego_frames = {}
+    with open(ego_csv) as f:
+        for row in _csv.DictReader(f):
+            ego_frames[int(row["frame"])] = (
+                float(row["x"]), -float(row["y_left"]), float(row["z"]),
+                -float(row["roll_left"]), float(row["pitch"]), -float(row["yaw_left"]))
+
+    # Load annotations keyed by frame
+    ann_files = sorted(glob.glob(os.path.join(ann_dir, "*.json")))
+    anns_by_frame = {}
+    for ap in ann_files:
+        frame = int(os.path.basename(ap).replace(".json", ""))
+        with open(ap) as f:
+            anns_by_frame[frame] = json.load(f)
+
+    out_dir = os.path.join(run_dir, "OCC", "original")
+    os.makedirs(out_dir, exist_ok=True)
+
+    try:
+        import carla
+    except ImportError:
+        print("  carla module not available, skipping GT OCC generation")
+        return
+
+    count = 0
+    for frame, (ex, ey, ez, eroll, epitch, eyaw) in ego_frames.items():
+        anns = anns_by_frame.get(frame)
+        if not anns:
+            continue
+        ego_tf = carla.Transform(
+            carla.Location(x=ex, y=ey, z=ez),
+            carla.Rotation(roll=eroll, pitch=epitch, yaw=eyaw))
+        eyaw_rad = m.radians(eyaw)
+        cy, sy = m.cos(eyaw_rad), m.sin(eyaw_rad)
+        dynamic_list = []
+        for a in anns:
+            loc = a["location"]; rot = a["rotation"]; ext = a["extent"]
+            # Ego frame (fwd=X, left=Y) → CARLA world (fwd=X, right=Y)
+            fx, fy, fz = loc["x"], loc["y"], loc["z"]
+            wx = ex + fx * cy + fy * sy
+            wy = ey + fx * sy - fy * cy
+            wz = ez + fz
+            # Left-hand rotation → CARLA world rotation
+            wroll = -rot["roll"]
+            wpitch = rot["pitch"]
+            wyaw = eyaw - rot["yaw"]
+            actor_tf = carla.Transform(
+                carla.Location(x=wx, y=wy, z=wz),
+                carla.Rotation(roll=wroll, pitch=wpitch, yaw=wyaw))
+            actor_ext = carla.Vector3D(x=ext["x"], y=ext["y"], z=ext["z"])
+            dynamic_list.append((actor_tf, actor_ext, a.get("type_id", "vehicle.car")))
+        occ = build_frame_occ(static_occ, static_pc_range, ego_tf, dynamic_list,
+                              pc_range, voxel_size, occ_shape)
+        np.save(os.path.join(out_dir, f"{frame:08d}.npy"), occ)
+        count += 1
+
+    print(f"OCC generated from GT: {count} frames → {out_dir}")
+
+
+def _generate_occ(run_dir, layout=None, force_all=False):
+    """Generate OCC npy + BEV visualization.
+
+    1. If OCC/original/*.npy exists → visualize directly
+    2. Elif OCC/annotations/ exists → auto-generate npy from GT annotations + static_occ, then visualize
+    3. Else → fall back to old LiDAR pipeline
+    """
+    if not force_all and layout is not None:
+        occ_enabled = False
+        for s in layout.get("sensors", []):
+            if s.get("modality") == "occupancy":
+                occ_enabled = s.get("enabled", True)
+                if not s.get("occ_vis", True):
+                    return
+                break
+        if not occ_enabled:
+            return
+    occ_original = os.path.join(run_dir, "OCC", "original")
+    npy_files = sorted(glob.glob(os.path.join(occ_original, "*.npy"))) if os.path.isdir(occ_original) else []
+
+    if npy_files:
+        _occ_bev_visualization(run_dir, npy_files)
+        return
+
+    # Auto-generate OCC from GT annotations if available
+    ann_dir = os.path.join(run_dir, "OCC", "annotations")
+    if os.path.isdir(ann_dir) and os.listdir(ann_dir):
+        ego_csv = os.path.join(run_dir, "TRAJ", "ego_trajectory.csv")
+        meta_path = os.path.join(run_dir, "OCC", "occ_metadata.json")
+        if os.path.exists(ego_csv) and os.path.exists(meta_path):
+            _generate_gt_occ(run_dir, ann_dir, ego_csv, meta_path)
+            npy_files = sorted(glob.glob(os.path.join(occ_original, "*.npy")))
+            if npy_files:
+                _occ_bev_visualization(run_dir, npy_files)
+                return
+
+    # Fallback: old LiDAR-based pipeline (backward compatible)
     x_min, x_max, y_min, y_max, z_min, z_max, res = _load_grid_params(run_dir)
-    occ_dir = os.path.join(run_dir, "OCC_GT")
+    occ_dir = os.path.join(run_dir, "OCC")
     os.makedirs(occ_dir, exist_ok=True)
-    with open(os.path.join(occ_dir, "metadata.json"), "w") as f:
-        json.dump({"x_min_m": x_min, "x_max_m": x_max, "y_min_m": y_min, "y_max_m": y_max,
-                    "z_min_m": z_min, "z_max_m": z_max, "resolution_m": res}, f)
+
+    lidar_dir = os.path.join(run_dir, "LIDAR_TOP", "original")
+    if not os.path.isdir(lidar_dir):
+        return
 
     ego_poses = _load_ego_poses(run_dir)
     nx = int(round((x_max - x_min) / res))
     ny = int(round((y_max - y_min) / res))
     nz = int(round((z_max - z_min) / res))
 
-    # === LiDAR → OCC ===
-    lidar_dir = os.path.join(run_dir, "LIDAR_TOP", "original")
-    if os.path.isdir(lidar_dir):
-        lidar_files = sorted(glob.glob(os.path.join(lidar_dir, "*.npy")))
-        print(f"OCC from LiDAR: {len(lidar_files)} frames → {occ_dir}")
-        for lpath in lidar_files:
-            frame_str = os.path.basename(lpath).replace(".npy", "")
-            frame = int(frame_str)
-            occ_path = os.path.join(occ_dir, f"{frame_str}.npy")
-            points = np.load(lpath)
-            # LiDAR data already in standard coords: X=forward, Y=left, Z=up
-            # Sensor at ego (0,0,1.8), shift Z only
-            ex = points[:, 0]        # forward
-            ey = points[:, 1]        # left (already standard)
-            ez = points[:, 2] + 1.8  # up (sensor at z=1.8 in ego)
-            ix = np.floor((ex-x_min)/res).astype(np.int32)
-            iy = np.floor((ey-y_min)/res).astype(np.int32)
-            iz = np.floor((ez-z_min)/res).astype(np.int32)
-            valid = (ix>=0)&(ix<nx)&(iy>=0)&(iy<ny)&(iz>=0)&(iz<nz)
-            if valid.sum() == 0:
-                continue
-            ix, iy, iz = ix[valid], iy[valid], iz[valid]
-            tags = _label_lidar_with_camera(run_dir, points, frame, ego_poses)
-            tags = tags[valid]
-            # Deduplicate at OCC resolution (keep last tag per voxel)
-            occ_idx = ix * ny * nz + iy * nz + iz
-            _, ui = np.unique(occ_idx, return_index=True)
-            ix, iy, iz, tags = ix[ui], iy[ui], iz[ui], tags[ui]
-            grid = np.zeros((nz, ny, nx), dtype=np.uint8)
-            grid[iz, iy, ix] = tags
-            np.save(occ_path, grid)
+    lidar_files = sorted(glob.glob(os.path.join(lidar_dir, "*.npy")))
+    print(f"OCC from LiDAR: {len(lidar_files)} frames → {occ_dir}")
+    for lpath in lidar_files:
+        frame_str = os.path.basename(lpath).replace(".npy", "")
+        frame = int(frame_str)
+        occ_path = os.path.join(occ_dir, f"{frame_str}.npy")
+        points = np.load(lpath)
+        ex = points[:, 0]; ey = points[:, 1]; ez = points[:, 2] + 1.8
+        ix = np.floor((ex-x_min)/res).astype(np.int32)
+        iy = np.floor((ey-y_min)/res).astype(np.int32)
+        iz = np.floor((ez-z_min)/res).astype(np.int32)
+        valid = (ix>=0)&(ix<nx)&(iy>=0)&(iy<ny)&(iz>=0)&(iz<nz)
+        if valid.sum() == 0:
+            continue
+        ix, iy, iz = ix[valid], iy[valid], iz[valid]
+        tags = _label_lidar_with_camera(run_dir, points, frame, ego_poses)
+        tags = tags[valid]
+        occ_idx = ix * ny * nz + iy * nz + iz
+        _, ui = np.unique(occ_idx, return_index=True)
+        ix, iy, iz, tags = ix[ui], iy[ui], iz[ui], tags[ui]
+        grid = np.zeros((nz, ny, nx), dtype=np.uint8)
+        grid[iz, iy, ix] = tags
+        np.save(occ_path, grid)
 
-    # === Actor annotations → overlaid on OCC ===
+    # Old actor overlay (kept for backward compat)
     for cam_dir in sorted(glob.glob(os.path.join(run_dir, "CAM_*"))):
         ann_dir = os.path.join(cam_dir, "annotations")
         if not os.path.isdir(ann_dir):
@@ -480,7 +601,6 @@ def _generate_occ(run_dir):
             for a in anns:
                 cat = actor_map.get(a.get("category"), 21)
                 loc, rot, bb = a["location"], a["rotation"], a["bbox_3d"]
-                # Annotations in ego frame: X=forward, Y=left, Z=up
                 cx, cy_e, cz_e = loc["x"], loc["y"], loc["z"]
                 rel_yaw = m.radians(rot["yaw"])
                 cr, sr = m.cos(rel_yaw), m.sin(rel_yaw)
@@ -512,43 +632,72 @@ def _generate_occ(run_dir):
                                 grid[iz, iy, ix] = cat
             np.save(occ_path, grid)
 
-    # === Generate BEV visualization ===
-    _occ_visualization(run_dir, occ_dir, x_min, x_max, y_min, y_max, res)
+    _occ_bev_visualization(run_dir, sorted(glob.glob(os.path.join(occ_dir, "*.npy"))), x_min, x_max, y_min, y_max, res)
 
 
-def _occ_visualization(run_dir, occ_dir, x_min, x_max, y_min, y_max, res):
-    npy_files = sorted(glob.glob(os.path.join(occ_dir, "*.npy")))
+def _occ_bev_visualization(run_dir, npy_files, x_min=None, x_max=None, y_min=None, y_max=None, res=None):
+    """BEV visualization of OCC npy files. Handles (X,Y,Z) grid format.
+
+    Grid layout: axis0=X (forward), axis1=Y (left), axis2=Z (up).
+    BEV: max over Z → (X,Y), rotated 90° CCW so forward=left, left=down.
+    """
     if not npy_files:
         return
-    viz_dir = os.path.join(run_dir, "OCC_GT_viz")
+
+    viz_dir = os.path.join(run_dir, "OCC", "occ_viz")
     os.makedirs(viz_dir, exist_ok=True)
-    print(f"OCC_GT_viz: {len(npy_files)} files")
+
+    # Auto-detect grid params from first npy + metadata
+    grid0 = np.load(npy_files[0])
+    if grid0.ndim != 3:
+        return
+    nx, ny = grid0.shape[0], grid0.shape[1]
+
+    if x_min is None:
+        meta_path = os.path.join(run_dir, "OCC", "occ_metadata.json")
+        if os.path.exists(meta_path):
+            with open(meta_path) as f:
+                meta = json.load(f)
+            pc = meta.get("pc_range", [-50, -50, -5, 50, 50, 3])
+            x_min, x_max, y_min, y_max = pc[0], pc[3], pc[1], pc[4]
+            res = meta.get("voxel_size", [0.5, 0.5, 0.5])[0]
+        else:
+            x_min, x_max = -50, 50
+            y_min, y_max = -50, 50
+            res = 0.5
+
+    print(f"OCC/occ_viz: {len(npy_files)} files")
+
     for npy_path in npy_files:
         grid = np.load(npy_path)
-        bev = grid.max(axis=0)
-        bev_img = np.flipud(np.fliplr(bev.T))  # (X,Y), row0=x_max, col0=y_max(=left)
+        # BEV: max over Z (axis=2), result (X, Y)
+        bev = np.max(grid, axis=2)  # (nx, ny)
+        # Transpose + flip → forward=top, left=left, then rotate 90° CCW
+        bev_img = np.rot90(np.flipud(bev.T), k=1)
+
         rgb = np.zeros((bev_img.shape[0], bev_img.shape[1], 3), dtype=np.uint8)
         for cat, color in OCC_COLORS.items():
             rgb[bev_img == cat] = color
+
         scale = 6
-        # Crop square centered on ego, using min available range
+        # Center crop around ego (ego at center of grid)
         half = min(abs(x_min), abs(x_max), abs(y_min), abs(y_max))
         r1 = max(0, int((x_max - half) / res))
         r2 = min(bev_img.shape[0], int((x_max + half) / res))
         c1 = max(0, int((-half - y_min) / res))
         c2 = min(bev_img.shape[1], int((half - y_min) / res))
-        bev_crop = bev_img[r1:r2, c1:c2]
-        rgb = np.zeros((bev_crop.shape[0], bev_crop.shape[1], 3), dtype=np.uint8)
-        for cat, color in OCC_COLORS.items():
-            rgb[bev_crop == cat] = color
+        if r2 > r1 and c2 > c1:
+            rgb = rgb[r1:r2, c1:c2]
+
         rgb_big = np.repeat(np.repeat(rgb, scale, axis=0), scale, axis=1)
-        # Ego at crop center
-        ego_r = rgb_big.shape[0] // 2
-        ego_c = rgb_big.shape[1] // 2
+        # Ego marker at center
         h, w = rgb_big.shape[:2]
-        if 0 <= ego_r < h and 0 <= ego_c < w:
-            rr, cc = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
-            rgb_big[(rr-ego_r)**2 + (cc-ego_c)**2 < (1*scale)**2] = (0, 255, 0)
+        cr, cc = h // 2, w // 2
+        if 0 <= cr < h and 0 <= cc < w:
+            rr, cc2 = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
+            mask = (rr - cr) ** 2 + (cc2 - cc) ** 2 < (1 * scale) ** 2
+            rgb_big[mask] = (0, 255, 0)
+
         fname = os.path.basename(npy_path).replace(".npy", ".png")
         Image.fromarray(rgb_big).save(os.path.join(viz_dir, fname))
 

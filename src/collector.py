@@ -24,13 +24,14 @@ class DataCollector:
         self._lidar_specs = []
         self._output_dir = None
         self._frame_annotations = {}
+        self._occ_ann_dir = None
 
     def run(self):
         self._server.connect()
         carla = self._server.carla
         client = self._server.client
 
-        town = self._config["carla"].get("town")
+        town = self._config["carla"].get("map")
         if town:
             self._world = client.load_world(town)
         else:
@@ -43,6 +44,8 @@ class DataCollector:
         settings.synchronous_mode = sync
         settings.fixed_delta_seconds = 1.0 / fps if sync else 0.0
         self._world.apply_settings(settings)
+
+        self._ensure_static_occ(self._world)
 
         bp_lib = self._world.get_blueprint_library()
         tm = client.get_trafficmanager()
@@ -119,6 +122,11 @@ class DataCollector:
         self._init_annotations()
         print(f"Attached sensors: {', '.join(self._sensors.keys())}")
 
+        # Sync tick: ensure all sensors (especially derived depth/semantic)
+        # fire at least once so frame counts align across modalities
+        if sync:
+            self._world.tick()
+
         duration = self._config.get("collection", {}).get("duration_seconds", 0)
         start_time = time.time()
         try:
@@ -131,6 +139,7 @@ class DataCollector:
 
                 self._write_annotations_for_new_frames()
                 self._record_ego_pose(frame)
+                self._save_occ_gt_data(frame)
 
                 if duration > 0 and (time.time() - start_time) >= duration:
                     break
@@ -140,6 +149,135 @@ class DataCollector:
             self._cleanup()
 
         self._convert_npy_to_jpg()
+
+    def _save_occ_gt_data(self, frame):
+        """Save per-frame GT annotations (ego frame, left-hand coords).
+
+        Same coordinate system as LiDAR annotations:
+          X=forward, Y=left, Z=up; roll=左翼下沉+, pitch=抬头+, yaw=机头左转+
+        Origin: ego vehicle center.
+
+        Includes dynamic actors + spatially-filtered static level_bbs.
+        """
+        if self._occ_ann_dir is None:
+            return
+        import json as _json
+
+        occ_cfg = self._occ_spec.get("output", {}) if self._occ_spec else {}
+        pc = occ_cfg.get("pc_range", [-50, -50, -5, 50, 50, 3])
+        margin = occ_cfg.get("static_filter_margin", 10.0)
+
+        ego_t = self._vehicle.get_transform()
+        ex, ey, ez = ego_t.location.x, ego_t.location.y, ego_t.location.z
+        eyaw = math.radians(ego_t.rotation.yaw)
+        cy, sy = math.cos(eyaw), math.sin(eyaw)
+
+        def _world_to_ego(wx, wy, wz, wroll, wpitch, wyaw):
+            """CARLA world (X=fwd,Y=right) → ego frame (X=fwd,Y=left)."""
+            dx, dy = wx - ex, wy - ey
+            return {
+                "x": dx * cy + dy * sy,
+                "y": dx * sy - dy * cy,      # Y=left
+                "z": wz - ez,
+                "roll": -wroll,
+                "pitch": wpitch,
+                "yaw": -(wyaw - ego_t.rotation.yaw),
+            }
+
+        annotations = []
+        ego_id = self._vehicle.id
+
+        # Dynamic actors
+        for actor in self._world.get_actors():
+            try:
+                if not actor.is_alive or actor.id == ego_id:
+                    continue
+                type_id = str(actor.type_id)
+                if not (type_id.startswith("vehicle.") or type_id.startswith("walker.")):
+                    continue
+                extent = actor.bounding_box.extent
+                t = actor.get_transform()
+                vel = actor.get_velocity()
+                p = _world_to_ego(t.location.x, t.location.y, t.location.z,
+                                  t.rotation.roll, t.rotation.pitch, t.rotation.yaw)
+                v = _world_to_ego(vel.x, vel.y, vel.z, 0, 0, 0)
+                annotations.append({
+                    "actor_id": int(actor.id),
+                    "type_id": type_id,
+                    "location": {"x": p["x"], "y": p["y"], "z": p["z"]},
+                    "rotation": {"roll": p["roll"], "pitch": p["pitch"], "yaw": p["yaw"]},
+                    "extent": {"x": float(extent.x), "y": float(extent.y), "z": float(extent.z)},
+                    "velocity": {"x": v["x"], "y": v["y"], "z": v["z"]},
+                })
+            except RuntimeError:
+                continue
+
+        # Static level_bbs (same categories as camera annotations)
+        static_label_map = {
+            self._server.carla.CityObjectLabel.Car: "static.car",
+            self._server.carla.CityObjectLabel.Truck: "static.truck",
+            self._server.carla.CityObjectLabel.Bus: "static.bus",
+            self._server.carla.CityObjectLabel.Train: "static.train",
+            self._server.carla.CityObjectLabel.Motorcycle: "static.motorcycle",
+            self._server.carla.CityObjectLabel.Bicycle: "static.bicycle",
+            self._server.carla.CityObjectLabel.Pedestrians: "static.pedestrian",
+        }
+        for obj_label, type_id in static_label_map.items():
+            try:
+                bbs = self._world.get_level_bbs(obj_label)
+            except RuntimeError:
+                continue
+            for bb in bbs:
+                # Spatial filter in ego frame (before conversion)
+                dx, dy = bb.location.x - ex, bb.location.y - ey
+                fwd = dx * cy + dy * sy
+                lft = dx * sy - dy * cy
+                if not (pc[0] - margin <= fwd <= pc[3] + margin and
+                        pc[1] - margin <= lft <= pc[4] + margin):
+                    continue
+                p = _world_to_ego(bb.location.x, bb.location.y, bb.location.z,
+                                  bb.rotation.roll, bb.rotation.pitch, bb.rotation.yaw)
+                annotations.append({
+                    "actor_id": -1,
+                    "type_id": type_id,
+                    "location": {"x": p["x"], "y": p["y"], "z": p["z"]},
+                    "rotation": {"roll": p["roll"], "pitch": p["pitch"], "yaw": p["yaw"]},
+                    "extent": {"x": float(bb.extent.x), "y": float(bb.extent.y), "z": float(bb.extent.z)},
+                    "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
+                })
+
+        ann_path = os.path.join(self._occ_ann_dir, f"{frame:08d}.json")
+        with open(ann_path, "w") as f:
+            _json.dump(annotations, f)
+
+    @staticmethod
+    def _ensure_static_occ(world):
+        """Generate static OCC for current map if not already cached."""
+        town = world.get_map().name.split("/")[-1]
+        npy_path = os.path.join("map", f"{town}_static_occ.npy")
+        if os.path.exists(npy_path):
+            return
+        print(f"Building static OCC for {town} (one-time, ~1-2 min)...")
+        os.makedirs("map", exist_ok=True)
+        from .occ_generator import build_static_occ
+        # Use a map-covering range from spawn points
+        spawn_pts = world.get_map().get_spawn_points()
+        xs = [sp.location.x for sp in spawn_pts]
+        ys = [sp.location.y for sp in spawn_pts]
+        margin = 100.0
+        pc_range = [min(xs) - margin, min(ys) - margin, -5.0,
+                     max(xs) + margin, max(ys) + margin, 3.0]
+        voxel_size = [0.5, 0.5, 0.5]
+        shape = [int(round((pc_range[3] - pc_range[0]) / voxel_size[0])),
+                 int(round((pc_range[4] - pc_range[1]) / voxel_size[1])),
+                 int(round((pc_range[5] - pc_range[2]) / voxel_size[2]))]
+        occ = build_static_occ(world, pc_range, voxel_size, shape)
+        np.save(npy_path, occ)
+        import json as _json
+        with open(npy_path.replace(".npy", ".json"), "w") as f:
+            _json.dump({"map": town, "pc_range": pc_range,
+                         "voxel_size": voxel_size, "shape": shape}, f)
+        print(f"Static OCC saved to {npy_path} ({occ.nbytes / 1e6:.0f} MB)")
 
     def _setup_filter_lidar(self, world, bp_lib, vehicle, cfg):
         bp = bp_lib.find(cfg.get("blueprint", "sensor.lidar.ray_cast"))
@@ -241,13 +379,16 @@ class DataCollector:
 
         if self._occ_spec is not None:
             from .sensors import _sensor_output_dir
-            self._occ_save_dir = _sensor_output_dir(self._output_dir, self._occ_spec)
-            # Save OCC grid params for post-processing
+            occ_save_dir = _sensor_output_dir(self._output_dir, self._occ_spec)
+            self._occ_ann_dir = os.path.join(self._output_dir, "OCC", "annotations")
+            os.makedirs(self._occ_ann_dir, exist_ok=True)
+            # Save OCC grid params + metadata for post-processing
             import json as _json
             occ_cfg = self._occ_spec.get("output", {})
-            with open(os.path.join(self._occ_save_dir, "grid_config.json"), "w") as _f:
+            occ_cfg["static_occ_dir"] = occ_cfg.get("static_occ_dir", "map")
+            occ_cfg["map"] = self._config["carla"].get("map", "")
+            with open(os.path.join(self._output_dir, "OCC", "occ_metadata.json"), "w") as _f:
                 _json.dump(occ_cfg, _f)
-            self._occ_save_dir = None  # OCC generated in post-processing
 
     def _write_annotations_for_new_frames(self):
         from .sensors import get_sensor_frames, get_sensor_data
@@ -875,106 +1016,6 @@ class DataCollector:
             )
         return created
 
-    def _backproject_camera_points(self, frame):
-        """Back-project depth+semantic pixels to 3D points in world coordinates."""
-        all_points = []
-        for spec in self._camera_specs:
-            channel = spec["channel"]
-            # Find nearest depth frame
-            depth_dir = os.path.join(self._output_dir, channel, "depth")
-            if not os.path.isdir(depth_dir):
-                continue
-            depth_files = sorted(os.listdir(depth_dir))
-            if not depth_files:
-                continue
-            depth_frames = [int(f.replace(".npy", "")) for f in depth_files if f.endswith(".npy")]
-            nearest_df = min(depth_frames, key=lambda x: abs(x - frame))
-            if abs(nearest_df - frame) > 10:
-                continue
-            depth = np.load(os.path.join(depth_dir, f"{nearest_df:08d}.npy"))
-
-            # Find nearest semantic frame
-            sem_dir = os.path.join(self._output_dir, channel, "semantic")
-            tags = None
-            if os.path.isdir(sem_dir):
-                sem_files = sorted(os.listdir(sem_dir))
-                sem_frames = [int(f.replace(".png", "")) for f in sem_files if f.endswith(".png")]
-                if sem_frames:
-                    nearest_sf = min(sem_frames, key=lambda x: abs(x - frame))
-                    if abs(nearest_sf - frame) <= 10:
-                        tags = np.array(Image.open(os.path.join(sem_dir, f"{nearest_sf:08d}.png")))
-
-            h, w = depth.shape
-            # Downsample: every 4th pixel → 16x faster, 90k points per frame
-            step = 4
-            depth = depth[::step, ::step]
-            if tags is not None:
-                tags = tags[::step, ::step]
-            h, w = depth.shape
-            # Camera intrinsic (adjusted for downsampled image)
-            from .sensors import _compute_intrinsic
-            K = _compute_intrinsic(spec)
-            fx, fy = K["fx"] / step, K["fy"] / step
-            cx, cy = K["cx"] / step, K["cy"] / step
-
-            # Pixel coordinates for downsampled image
-            u, v = np.meshgrid(np.arange(w), np.arange(h))
-            # Back-project: X_cam = Z, Y_cam = (u-cx)*Z/fx, Z_cam = -(v-cy)*Z/fy
-            Z = depth  # forward depth
-            X_cam = (u - cx) * Z / fx   # right in camera frame
-            Y_cam = -(v - cy) * Z / fy  # up in camera frame... wait, CARLA camera: X=forward, Y=right, Z=up
-            # In CARLA: image u → right (Y axis), v → down (-Z axis)
-            # So: forward=X_cam=Z_depth, right=Y_cam=(u-cx)*Z/fx, up=Z_cam=-(v-cy)*Z/fy
-
-            # Filter invalid depths
-            valid = (Z > 0.1) & (Z < 999)
-            if valid.sum() == 0:
-                continue
-
-            # Camera coord: X=forward, Y=right, Z=up
-            pts_cam = np.stack([
-                Z[valid],                              # forward (X in CARLA)
-                (u[valid] - cx) * Z[valid] / fx,      # right (Y in CARLA)
-                -(v[valid] - cy) * Z[valid] / fy,     # up (Z in CARLA)
-            ], axis=-1)  # (N, 3)
-
-            # Transform from camera to world
-            cam_sensor = self._rgb_sensors.get(channel)
-            if cam_sensor is None or not cam_sensor.is_alive:
-                continue
-            cam_t = cam_sensor.get_transform()
-            cam_loc = cam_t.location
-            cam_rot = cam_t.rotation
-
-            # Camera world transform: first rotate, then translate
-            cy = math.cos(math.radians(cam_rot.yaw))
-            sy = math.sin(math.radians(cam_rot.yaw))
-            cp = math.cos(math.radians(cam_rot.pitch))
-            sp = math.sin(math.radians(cam_rot.pitch))
-            cr = math.cos(math.radians(cam_rot.roll))
-            sr = math.sin(math.radians(cam_rot.roll))
-
-            R_yaw = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
-            R_pitch = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
-            R_roll = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
-            R = R_yaw @ R_pitch @ R_roll  # camera→world rotation
-
-            # Camera coords → world coords
-            pts_world = (R @ pts_cam.T).T + np.array([cam_loc.x, cam_loc.y, cam_loc.z])
-
-            # Attach semantic tags
-            if tags is not None:
-                tag_values = tags[valid].reshape(-1, 1)
-            else:
-                tag_values = np.full((len(pts_world), 1), 20)  # static
-
-            pts_with_tag = np.hstack([pts_world, np.zeros((len(pts_world), 1)), tag_values, np.zeros((len(pts_world), 1))])
-            all_points.append(pts_with_tag)
-
-        if all_points:
-            return np.vstack(all_points)
-        return None
-
     def _record_ego_pose(self, frame):
         ego_t = self._vehicle.get_transform()
         row = [frame, ego_t.location.x, -ego_t.location.y, ego_t.location.z,
@@ -990,76 +1031,6 @@ class DataCollector:
     def _convert_npy_to_jpg(self):
         from tools.npy2jpg import convert_run
         convert_run(self._output_dir)
-
-    def _write_occ(self, frame):
-        from .occupancy import build_occupancy_grid
-
-        # Fuse depth + semantic camera into dense 3D points
-        camera_points = self._backproject_camera_points(frame)
-
-        lidar_points = None
-
-        actors = list(self._world.get_actors())
-        annotations = []
-        ego_id = self._vehicle.id
-
-        for actor in actors:
-            try:
-                if not actor.is_alive or actor.id == ego_id:
-                    continue
-                type_id = str(actor.type_id)
-                if type_id.startswith("vehicle."):
-                    category = "vehicle"
-                elif type_id.startswith("walker.pedestrian."):
-                    category = "pedestrian"
-                else:
-                    continue
-                bbox = actor.bounding_box.extent
-                t = actor.get_transform()
-                annotations.append({
-                    "category": category,
-                    "bbox_3d": {
-                        "x": float(bbox.x * 2), "y": float(bbox.y * 2), "z": float(bbox.z * 2),
-                    },
-                    "location": {
-                        "x": float(t.location.x),
-                        "y": float(t.location.y),
-                        "z": float(t.location.z),
-                    },
-                    "rotation": {
-                        "yaw": float(t.rotation.yaw),
-                    },
-                })
-            except RuntimeError:
-                continue
-
-        occ_cfg = self._occ_spec.get("output", {})
-        grid = build_occupancy_grid(self._vehicle, annotations, occ_cfg, camera_points)
-        np.save(os.path.join(self._occ_save_dir, f"{frame:08d}.npy"), grid)
-        # Save metadata once
-        meta_path = os.path.join(self._occ_save_dir, "metadata.json")
-        if not os.path.exists(meta_path):
-            import json
-            with open(meta_path, "w") as f:
-                json.dump({
-                    "x_min_m": occ_cfg.get("x_min_m", -20),
-                    "x_max_m": occ_cfg.get("x_max_m", 80),
-                    "y_min_m": occ_cfg.get("y_min_m", -40),
-                    "y_max_m": occ_cfg.get("y_max_m", 40),
-                    "z_min_m": occ_cfg.get("z_min_m", -2),
-                    "z_max_m": occ_cfg.get("z_max_m", 4),
-                    "resolution_m": occ_cfg.get("resolution_m", 0.2),
-                    "categories": {
-                        "0": "free", "1": "road", "2": "sidewalk", "3": "building",
-                        "4": "wall", "5": "fence", "6": "pole", "7": "traffic_light",
-                        "8": "traffic_sign", "9": "vegetation", "10": "terrain",
-                        "11": "sky", "12": "pedestrian", "13": "rider", "14": "car",
-                        "15": "truck", "16": "bus", "17": "train", "18": "motorcycle",
-                        "19": "bicycle", "20": "static", "21": "dynamic", "22": "other",
-                        "23": "water", "24": "road_line", "25": "ground",
-                        "26": "bridge", "27": "rail_track", "28": "guard_rail",
-                    },
-                }, f)
 
     def _make_output_dir(self):
         base = self._config.get("collection", {}).get("output_dir", "output")

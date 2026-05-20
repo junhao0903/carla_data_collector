@@ -111,9 +111,10 @@ sensors:
       yaw: 0.0
 
   - id: occ_grid
-    channel: OCC_GT
+    channel: OCC
     modality: occupancy
     enabled: true
+    occ_vis: true       # 是否生成 OCC BEV 可视化
     rate_hz: 20
     transform:
       x: 0.0
@@ -123,13 +124,6 @@ sensors:
       pitch: 0.0
       yaw: 0.0
     output:
-      x_min_m: -100.0
-      x_max_m: 100.0
-      y_min_m: -100.0
-      y_max_m: 100.0
-      z_min_m: -2.0
-      z_max_m: 4.0
-      resolution_m: 0.5
-      include_categories:
-        - vehicle
-        - pedestrian
+      pc_range: [-50.0, -50.0, -5.0, 50.0, 50.0, 3.0]
+      voxel_size: [0.5, 0.5, 0.5]
+      static_occ_dir: "map"

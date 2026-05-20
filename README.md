@@ -1,9 +1,14 @@
 # CARLA Data Collector
 
-CARLA 0.9.14 仿真数据自动采集工具。
+CARLA 0.9.x 仿真数据自动采集工具。
 
 ## 快速开始
 
+> **使用前需配置 CARLA 路径**：本项目依赖 CARLA 0.9.x，请将以下两个文件中的路径改为你的实际路径：
+>
+> - `scripts/start_carla.sh` → `CARLA_SCRIPT=/你的路径/carlaUE4.sh`
+> - `config/main/default.yaml` → `launch_command: ["/你的路径/carlaUE4.sh"]`（以及 `config/main/` 下其他 yaml）
+```
 ```bash
 conda activate carla
 bash scripts/start_carla.sh        # 启动 CARLA（后台运行）
@@ -20,10 +25,10 @@ python run.py config/main/other.yaml
 
 ```bash
 # 正常模式：遵循 sensor_layout.yaml 中的 vis 开关
-python tools/npy2jpg.py output/20260519_094603
+python tools/npy2jpg.py output/指定文件夹
 
 # 强制全开：忽略所有 vis 开关，生成全部可视化
-python tools/npy2jpg.py output/20260519_094603 --all
+python tools/npy2jpg.py output/指定文件夹 --all
 ```
 
 适用于采集时关了可视化开关，采完又想看的场景。
@@ -85,8 +90,11 @@ output/<YYYYMMDD_HHMMSS>/
 │   └── trajectory_viz/       # 轨迹 BEV 可视化 (.png)
 ├── GNSS/data.csv             # 全球定位 (lat/lon/alt)
 ├── IMU/data.csv              # 惯性测量 (加速度/角速度/罗盘)
-├── OCC_GT/                   # 3D 占用栅格 (.npy)
-└── OCC_GT_viz/               # OCC BEV 可视化 (.png)
+├── OCC/
+│   ├── annotations/       # 世界坐标系 actor 标注 (.json)
+│   ├── original/          # 3D 占用栅格 (.npy)
+│   ├── occ_viz/           # OCC BEV 可视化 (.png)
+│   └── occ_metadata.json  # OCC 参数
 ```
 
 ## 坐标系
@@ -101,10 +109,12 @@ output/<YYYYMMDD_HHMMSS>/
 | LiDAR 标注 | 前 | 左 | 上 | 左翼下沉 | 抬头 | 机头左转 | 自车 |
 | CAM 标注 (world) | 前 | 右(CARLA) | 上 | 右翼下沉(CARLA) | 抬头 | 机头右转(CARLA) | CARLA世界 |
 | CAM 标注 (camera) | 前 | 左 | 上 | 左翼下沉(相对) | 抬头(相对) | 机头左转(相对) | 相机 |
+| OCC 标注 | 前 | 左 | 上 | 左翼下沉 | 抬头 | 机头左转 | 自车 |
 | ego_trajectory | 前 | 左 | 上 | 左翼下沉 | 抬头 | 机头左转 | CARLA世界 |
 | IMU accel | 前 | 左 | 上 | — | — | — | 车体 |
 | IMU gyro | 前(左滚+) | 左(抬头+) | 上(左转+) | — | — | — | 车体 |
 | GNSS | — | — | — | — | — | — | WGS84 |
+| OCC 栅格 | 前 | 左 | 上 | — | — | — | 自车 |
 
 ### CARLA 世界 → 本系统变换
 
@@ -117,10 +127,11 @@ CARLA (Unreal) 原始坐标系: X=前, Y=**右**, Z=上, roll=右翼下沉, yaw=
 - **动态 actor**: `location.z` = 几何中心 (pivot地面 + half_height)
 - **静态 BBs**: `location.z` = 几何中心 (`bb.location.z`)
 - **相机帧 Z**: `loc_world.z - cam.z + bbox_height/2` = 几何中心相对相机
+- **OCC 标注 extent**: 半尺寸 (`bbox.extent`)，`x/y/z` = 半长/半宽/半高
 
 ### bbox_3d 格式
 
-`{"x": full_length, "y": full_width, "z": full_height}` — 完整尺寸 (extent × 2)
+`{"x": full_length, "y": full_width, "z": full_height}` — 完整尺寸 (extent × 2)，仅相机/LiDAR 标注使用
 
 ### bbox_2d 格式 (仅相机标注)
 
@@ -168,3 +179,22 @@ CARLA (Unreal) 原始坐标系: X=前, Y=**右**, Z=上, roll=右翼下沉, yaw=
 | 26 | bridge | (150, 100, 100) | ![#966464](https://placehold.co/15x15/966464/966464.png) |
 | 27 | rail_track | (230, 150, 140) | ![#E6968C](https://placehold.co/15x15/E6968C/E6968C.png) |
 | 28 | guard_rail | (180, 165, 180) | ![#B4A5B4](https://placehold.co/15x15/B4A5B4/B4A5B4.png) |
+
+## OCC (3D Semantic Occupancy)
+
+基于 CARLA GT Geometry 生成的 3D 语义占用栅格，用于 BEV/Occupancy 预测任务训练。
+
+### 架构
+
+```
+CARLA GT Geometry
+        ↓
+waypoint → road / sidewalk
+get_level_bbs → building, wall, fence, pole, traffic_sign, vegetation
+        ↓
+static_occ.npy (一次性预生成，全地图)
+        ↓
+采集阶段: 每帧保存 ego pose + dynamic/static actor 标注
+        ↓
+后处理: static_occ 裁剪 + 动态 actor 叠加 → 每帧 occ.npy
+```
