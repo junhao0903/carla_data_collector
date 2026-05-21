@@ -124,6 +124,6 @@ sensors:
       pitch: 0.0
       yaw: 0.0
     output:
-      pc_range: [-50.0, -50.0, -5.0, 50.0, 50.0, 3.0]
+      pc_range: [-50.0, -50.0, -5.0, 50.0, 50.0, 10.0]
       voxel_size: [0.5, 0.5, 0.5]
       static_occ_dir: "map"

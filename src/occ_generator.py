@@ -11,9 +11,9 @@ import math
 import numpy as np
 
 # ── OCC space (ego-centric, left-hand: X=forward, Y=left, Z=up) ──
-PC_RANGE = [-50.0, -50.0, -5.0, 50.0, 50.0, 3.0]
+PC_RANGE = [-50.0, -50.0, -5.0, 50.0, 50.0, 10.0]
 VOXEL_SIZE = [0.5, 0.5, 0.5]
-OCC_SHAPE = [200, 200, 16]  # X, Y, Z
+OCC_SHAPE = [200, 200, 30]  # X, Y, Z
 
 
 def _clamp_voxel_indices(x_min, x_max, y_min, y_max, z_min, z_max,
@@ -136,8 +136,10 @@ def fill_road_from_waypoints(occ, world, pc_range=None, voxel_size=None,
         x_max_w = loc.x + dx
         y_min_w = loc.y - dy
         y_max_w = loc.y + dy
-        z_min_w = loc.z - z_thickness
-        z_max_w = loc.z + z_thickness
+        # Single voxel layer at waypoint Z
+        iz_c = int((loc.z - pc_range[2]) / voxel_size[2])
+        z_min_w = pc_range[2] + iz_c * voxel_size[2]
+        z_max_w = z_min_w
 
         indices = _clamp_voxel_indices(x_min_w, x_max_w, y_min_w, y_max_w,
                                        z_min_w, z_max_w, pc_range, voxel_size, occ.shape)

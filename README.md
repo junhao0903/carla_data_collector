@@ -8,7 +8,6 @@ CARLA 0.9.x 仿真数据自动采集工具。
 >
 > - `scripts/start_carla.sh` → `CARLA_SCRIPT=/你的路径/carlaUE4.sh`
 > - `config/main/default.yaml` → `launch_command: ["/你的路径/carlaUE4.sh"]`（以及 `config/main/` 下其他 yaml）
-```
 ```bash
 conda activate carla
 bash scripts/start_carla.sh        # 启动 CARLA（后台运行）
@@ -21,17 +20,20 @@ python run.py config/main/other.yaml
 
 ## 后处理可视化
 
-采完数据后，可单独运行后处理生成可视化：
+采完数据后，可单独运行后处理：
 
 ```bash
-# 正常模式：遵循 sensor_layout.yaml 中的 vis 开关
+# 可视化（BEV 图、深度/语义着色、标注框，遵循 vis 开关）
 python tools/npy2jpg.py output/指定文件夹
+python tools/npy2jpg.py output/指定文件夹 --all   # 强制全开
 
-# 强制全开：忽略所有 vis 开关，生成全部可视化
-python tools/npy2jpg.py output/指定文件夹 --all
+# OCC 投影到相机图像
+python tools/occ_projection.py output/指定文件夹
+python tools/occ_projection.py output/指定文件夹 --channel CAM_FRONT_LEFT
+
+# OCC 导出 ROS PointCloud2 rosbag
+python tools/occ_to_rosbag.py output/指定文件夹
 ```
-
-适用于采集时关了可视化开关，采完又想看的场景。
 
 ## 配置结构
 
@@ -91,10 +93,14 @@ output/<YYYYMMDD_HHMMSS>/
 ├── GNSS/data.csv             # 全球定位 (lat/lon/alt)
 ├── IMU/data.csv              # 惯性测量 (加速度/角速度/罗盘)
 ├── OCC/
-│   ├── annotations/       # 世界坐标系 actor 标注 (.json)
-│   ├── original/          # 3D 占用栅格 (.npy)
+│   ├── annotations/       # 自车坐标系 actor 标注 (.json)
+│   ├── original/          # 3D 占用栅格 (.npy, 200×200×30)
 │   ├── occ_viz/           # OCC BEV 可视化 (.png)
+│   ├── projection_CAM_FRONT/  # 投影到相机图像 (.jpg)
+│   ├── occ.bag            # ROS PointCloud2 rosbag
 │   └── occ_metadata.json  # OCC 参数
+├── map/                       # 地图静态 OCC（自动生成）
+│   └── Town10HD_static_occ.npy
 ```
 
 ## 坐标系

@@ -198,17 +198,34 @@ class DataCollector:
                 extent = actor.bounding_box.extent
                 t = actor.get_transform()
                 vel = actor.get_velocity()
-                p = _world_to_ego(t.location.x, t.location.y, t.location.z,
+                # location: geometric center (pivot + half_height)
+                p = _world_to_ego(t.location.x, t.location.y,
+                                  t.location.z + extent.z,
                                   t.rotation.roll, t.rotation.pitch, t.rotation.yaw)
-                v = _world_to_ego(vel.x, vel.y, vel.z, 0, 0, 0)
+                # velocity: rotate only, don't translate
+                vx = vel.x * cy + vel.y * sy
+                vy = vel.x * sy - vel.y * cy
                 annotations.append({
                     "actor_id": int(actor.id),
                     "type_id": type_id,
                     "location": {"x": p["x"], "y": p["y"], "z": p["z"]},
                     "rotation": {"roll": p["roll"], "pitch": p["pitch"], "yaw": p["yaw"]},
                     "extent": {"x": float(extent.x), "y": float(extent.y), "z": float(extent.z)},
-                    "velocity": {"x": v["x"], "y": v["y"], "z": v["z"]},
+                    "velocity": {"x": vx, "y": vy, "z": vel.z},
                 })
+            except RuntimeError:
+                continue
+
+        # Collect dynamic actor world positions for dedup
+        dynamic_world_positions = []
+        for actor in self._world.get_actors():
+            try:
+                if not actor.is_alive or actor.id == ego_id:
+                    continue
+                type_id = str(actor.type_id)
+                if type_id.startswith("vehicle.") or type_id.startswith("walker."):
+                    t = actor.get_transform()
+                    dynamic_world_positions.append((t.location.x, t.location.y))
             except RuntimeError:
                 continue
 
@@ -228,10 +245,19 @@ class DataCollector:
             except RuntimeError:
                 continue
             for bb in bbs:
+                # Skip if overlaps with any dynamic actor (same as camera annotations)
+                bx, by = bb.location.x, bb.location.y
+                overlap = False
+                for dx, dy in dynamic_world_positions:
+                    if abs(bx - dx) < 3.0 and abs(by - dy) < 3.0:
+                        overlap = True
+                        break
+                if overlap:
+                    continue
                 # Spatial filter in ego frame (before conversion)
-                dx, dy = bb.location.x - ex, bb.location.y - ey
-                fwd = dx * cy + dy * sy
-                lft = dx * sy - dy * cy
+                dx2, dy2 = bx - ex, by - ey
+                fwd = dx2 * cy + dy2 * sy
+                lft = dx2 * sy - dy2 * cy
                 if not (pc[0] - margin <= fwd <= pc[3] + margin and
                         pc[1] - margin <= lft <= pc[4] + margin):
                     continue
@@ -266,7 +292,7 @@ class DataCollector:
         ys = [sp.location.y for sp in spawn_pts]
         margin = 100.0
         pc_range = [min(xs) - margin, min(ys) - margin, -5.0,
-                     max(xs) + margin, max(ys) + margin, 3.0]
+                     max(xs) + margin, max(ys) + margin, 15.0]
         voxel_size = [0.5, 0.5, 0.5]
         shape = [int(round((pc_range[3] - pc_range[0]) / voxel_size[0])),
                  int(round((pc_range[4] - pc_range[1]) / voxel_size[1])),

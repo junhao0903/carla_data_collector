@@ -24,7 +24,7 @@ traffic:
 
 collection:
   output_dir: output       # 数据输出根目录
-  duration_seconds: 10      # 采集时长 (秒), 0 = 不限时, Ctrl+C 退出
+  duration_seconds: 20      # 采集时长 (秒), 0 = 不限时, Ctrl+C 退出
   synchronous: true        # 同步模式 (建议开启, 保证数据帧率稳定)
   warmup_ticks: 10         # 预热 ticks (传感器稳定期, 不记录数据)
   motion_speed_kmh: 5       # 车速达到此值 (km/h) 开始采集
