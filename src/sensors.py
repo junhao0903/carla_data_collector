@@ -113,6 +113,12 @@ def _attach_camera(world, vehicle, bp_lib, spec, transform, save_dir):
 # Shared state: last frame captured per sensor channel
 _sensor_frames = {}
 _sensor_data = {}  # channel → latest point cloud array
+_current_world_frame = 0
+
+
+def set_world_frame(frame):
+    global _current_world_frame
+    _current_world_frame = frame
 
 
 def get_sensor_frames():
@@ -128,7 +134,7 @@ def _camera_callback(save_dir, channel):
         _sensor_frames[channel] = image.frame
         array = np.frombuffer(image.raw_data, dtype=np.uint8)
         array = array.reshape((image.height, image.width, 4))
-        np.save(os.path.join(save_dir, f"{image.frame:08d}.npy"), array)
+        np.save(os.path.join(save_dir, f"{_current_world_frame:08d}.npy"), array)
 
     return cb
 
@@ -166,7 +172,7 @@ def _depth_callback(save_dir):
         else:
             array = array.reshape((h, w))
             depth = array.astype(np.float32)
-        np.save(os.path.join(save_dir, f"{image.frame:08d}.npy"), depth)
+        np.save(os.path.join(save_dir, f"{_current_world_frame:08d}.npy"), depth)
 
     return cb
 
@@ -231,7 +237,7 @@ def _semantic_callback(save_dir):
         else:
             tags = array.reshape((h, w))
         img = Image.fromarray(tags, mode="L")
-        img.save(os.path.join(save_dir, f"{image.frame:08d}.png"))
+        img.save(os.path.join(save_dir, f"{_current_world_frame:08d}.png"))
 
     return cb
 
@@ -264,7 +270,7 @@ def _lidar_callback(save_dir, channel):
         points = points.reshape((-1, 4))
         points[:, 1] = -points[:, 1]  # Y: right → left (standard)
         _sensor_data[channel] = points
-        np.save(os.path.join(save_dir, f"{data.frame:08d}.npy"), points)
+        np.save(os.path.join(save_dir, f"{_current_world_frame:08d}.npy"), points)
 
     return cb
 
@@ -294,7 +300,7 @@ def _semantic_lidar_callback(save_dir, channel):
         points = points.reshape((-1, 6))  # x, y, z, cos_angle, obj_tag, obj_idx
         points[:, 1] = -points[:, 1]  # Y: right → left (standard)
         _sensor_data[channel] = points
-        np.save(os.path.join(save_dir, f"{data.frame:08d}.npy"), points)
+        np.save(os.path.join(save_dir, f"{_current_world_frame:08d}.npy"), points)
 
     return cb
 
@@ -318,7 +324,7 @@ def _gnss_callback(save_dir):
 
     def cb(data):
         writer.writerow(
-            [data.frame, data.timestamp, data.latitude, data.longitude, data.altitude]
+            [_current_world_frame, data.timestamp, data.latitude, data.longitude, data.altitude]
         )
         f.flush()
 
@@ -352,7 +358,7 @@ def _imu_callback(save_dir):
     def cb(data):
         writer.writerow(
             [
-                data.frame, data.timestamp,
+                _current_world_frame, data.timestamp,
                 data.accelerometer.x, -data.accelerometer.y, data.accelerometer.z,
                 -data.gyroscope.x, data.gyroscope.y, -data.gyroscope.z,
                 data.compass,

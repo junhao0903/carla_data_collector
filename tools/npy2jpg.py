@@ -7,6 +7,7 @@ import json
 import math as m
 import numpy as np
 from PIL import Image
+from tqdm import tqdm
 
 # CARLA semantic colors for OCC viz
 OCC_COLORS = {
@@ -64,6 +65,7 @@ def convert_run(run_dir, quality=95, force_all=False):
     _depth_visualization(run_dir, layout, quality, force_all)
     _semantic_visualization(run_dir, layout, force_all)
     _generate_occ(run_dir, layout, force_all)
+    _occ_projection_viz(run_dir, layout, force_all)
     _annotation_visualization(run_dir, layout, force_all)
     _trajectory_visualization(run_dir, layout, force_all)
 
@@ -76,8 +78,9 @@ def _convert_orin(run_dir, quality):
         npy_files = sorted(glob.glob(os.path.join(sub_dir, "*.npy")))
         if not npy_files:
             continue
+        channel = os.path.basename(cam_dir)
         print(f"{cam_dir}/original: {len(npy_files)} files -> jpg")
-        for npy_path in npy_files:
+        for npy_path in tqdm(npy_files, desc=f"{channel} original", leave=False):
             arr = np.load(npy_path)
             if arr.ndim == 3 and arr.shape[2] == 4:
                 jpg_path = npy_path.replace(".npy", ".jpg")
@@ -99,7 +102,7 @@ def _depth_visualization(run_dir, layout, quality, force_all=False):
         viz_dir = os.path.join(cam_dir, "depth_viz")
         os.makedirs(viz_dir, exist_ok=True)
         print(f"{cam_dir}/depth_viz: {len(npy_files)} files (npy kept in depth/)")
-        for npy_path in npy_files:
+        for npy_path in tqdm(npy_files, desc=f"{channel} depth_viz", leave=False):
             depth = np.load(npy_path)
             clipped = np.clip(depth, 0.0, 250.0)
             normalized = 1.0 - clipped / 250.0
@@ -256,7 +259,7 @@ def _semantic_visualization(run_dir, layout, force_all=False):
         viz_dir = os.path.join(cam_dir, "semantic_viz")
         os.makedirs(viz_dir, exist_ok=True)
         print(f"{cam_dir}/semantic_viz: {len(png_files)} files")
-        for png_path in png_files:
+        for png_path in tqdm(png_files, desc=f"{channel} semantic_viz", leave=False):
             tags = np.array(Image.open(png_path))  # (H, W) uint8
             rgb = np.zeros((tags.shape[0], tags.shape[1], 3), dtype=np.uint8)
             for tag, color in OCC_COLORS.items():
@@ -289,22 +292,25 @@ def _camera_annotation_viz(run_dir, layout, force_all=False):
             continue
         viz_dir = os.path.join(cam_dir, "annotations_viz")
         os.makedirs(viz_dir, exist_ok=True)
-        img_files = sorted(glob.glob(os.path.join(orin_dir, "*.jpg")))
+        img_files = sorted(glob.glob(os.path.join(orin_dir, "*.jpg")) +
+                          glob.glob(os.path.join(orin_dir, "*.npy")))
         if not img_files:
             continue
         print(f"{cam_dir}/annotations_viz: {len(img_files)} files")
-        for img_path in img_files:
+        for img_path in tqdm(img_files, desc=f"{channel} annotations_viz", leave=False):
             fname = os.path.basename(img_path)
-            frame = fname.replace(".jpg", "")
+            frame = fname.replace(".jpg", "").replace(".npy", "")
             ann_path = os.path.join(ann_dir, f"{frame}.json")
             if not os.path.exists(ann_path):
                 continue
             with open(ann_path) as f:
                 anns = json.load(f)
-            if not anns:
-                continue
             from PIL import ImageDraw
-            img = Image.open(img_path).copy()
+            if img_path.endswith(".npy"):
+                arr = np.load(img_path)  # (H, W, 4) BGRA
+                img = Image.fromarray(arr[:, :, [2, 1, 0]])  # BGR→RGB
+            else:
+                img = Image.open(img_path).copy()
             draw = ImageDraw.Draw(img)
             for a in anns:
                 bbox = a.get("bbox_2d")
@@ -346,20 +352,17 @@ def _lidar_annotation_viz(run_dir, layout, force_all=False):
         os.makedirs(ann_viz_dir, exist_ok=True)
 
         lidar_files = sorted(glob.glob(os.path.join(lidar_dir, "*.npy")))
-        rng, scale, vmin, vmax = 60, 6, -1.5, 3.0  # range ±60m, 6x upscale, Z clip
-        size = int(2 * rng / 0.1)  # 0.1m/pixel raw
+        rng, scale, vmin, vmax = 60, 2, -1.5, 3.0  # range ±60m, 2x upscale, Z clip
+        size = int(2 * rng / 0.2)  # 0.2m/pixel raw
 
         print(f"{channel}/annotations_viz: {len(lidar_files)} frames")
-        for lpath in lidar_files:
+        for lpath in tqdm(lidar_files, desc=f"{channel} lidar_viz", leave=False):
             frame_str = os.path.basename(lpath).replace(".npy", "")
             ann_path = os.path.join(lidar_ann_dir, f"{frame_str}.json")
             if not os.path.exists(ann_path):
                 continue
             with open(ann_path) as f:
                 anns = json.load(f)
-            if not anns:
-                continue
-
             points = np.load(lpath)  # (N, 4) or (N, 6), X=fwd, Y=left, Z=up
             lx, ly, lz = points[:,0], points[:,1], points[:,2] + 1.8  # sensor→ego Z shift
 
@@ -500,6 +503,22 @@ def _generate_gt_occ(run_dir, ann_dir, ego_csv, meta_path):
         count += 1
 
     print(f"OCC generated from GT: {count} frames → {out_dir}")
+
+
+def _occ_projection_viz(run_dir, layout=None, force_all=False):
+    """Generate OCC overhead projection if projection_vis is enabled."""
+    if not force_all and layout is not None:
+        for s in layout.get("sensors", []):
+            if s.get("modality") == "occupancy":
+                if not s.get("projection_vis", True):
+                    return
+                break
+    occ_files = sorted(glob.glob(os.path.join(run_dir, "OCC", "original", "*.npy")))
+    if not occ_files:
+        return
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from tools.occ_projection import _run_virtual_view
+    _run_virtual_view(run_dir, [os.path.basename(f) for f in occ_files], None, 2)
 
 
 def _generate_occ(run_dir, layout=None, force_all=False):
@@ -668,7 +687,7 @@ def _occ_bev_visualization(run_dir, npy_files, x_min=None, x_max=None, y_min=Non
 
     print(f"OCC/occ_viz: {len(npy_files)} files")
 
-    for npy_path in npy_files:
+    for npy_path in tqdm(npy_files, desc="OCC BEV", leave=False):
         grid = np.load(npy_path)
         # BEV: max over Z (axis=2), result (X, Y)
         bev = np.max(grid, axis=2)  # (nx, ny)

@@ -144,7 +144,8 @@ def run(run_dir, topic="/occ/points", fps=20, sample=1):
 def main():
     parser = argparse.ArgumentParser(
         description="Convert OCC npy to ROS PointCloud2 rosbag")
-    parser.add_argument("run_dir", help="Path to collection run directory")
+    parser.add_argument("run_dir", nargs="?", default=None,
+                        help="Path to collection run directory (default: latest output)")
     parser.add_argument("--topic", default="/occ/points",
                         help="ROS topic name (default: /occ/points)")
     parser.add_argument("--fps", type=float, default=20,
@@ -152,8 +153,16 @@ def main():
     parser.add_argument("--sample", type=int, default=1,
                         help="Voxel downsampling step (default: 1)")
     args = parser.parse_args()
-
-    run(args.run_dir, args.topic, args.fps, args.sample)
+    run_dir = args.run_dir
+    if run_dir is None:
+        import glob
+        dirs = sorted(glob.glob("output/*"))
+        if not dirs:
+            print("No output directories found")
+            return
+        run_dir = dirs[-1]
+        print(f"Using latest: {run_dir}")
+    run(run_dir, args.topic, args.fps, args.sample)
 
 
 if __name__ == "__main__":

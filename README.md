@@ -2,6 +2,8 @@
 
 CARLA 0.9.x 仿真数据自动采集工具。
 
+![composite](doc/composite.gif)
+
 ## 快速开始
 
 > **使用前需配置 CARLA 路径**：本项目依赖 CARLA 0.9.x，请将以下两个文件中的路径改为你的实际路径：
@@ -23,16 +25,21 @@ python run.py config/main/other.yaml
 采完数据后，可单独运行后处理：
 
 ```bash
-# 可视化（BEV 图、深度/语义着色、标注框，遵循 vis 开关）
+# 全部可视化（BEV/OCC/深度/语义/标注/投影/轨迹，遵循 sensor_layout.yaml 中 vis 开关）
 python tools/npy2jpg.py output/指定文件夹
-python tools/npy2jpg.py output/指定文件夹 --all   # 强制全开
+python tools/npy2jpg.py output/指定文件夹 --all          # 忽略 vis 开关，强制全开
 
-# OCC 投影到相机图像
+# 单独 OCC 投影（默认俯瞰视角）
 python tools/occ_projection.py output/指定文件夹
 python tools/occ_projection.py output/指定文件夹 --channel CAM_FRONT_LEFT
 
 # OCC 导出 ROS PointCloud2 rosbag
 python tools/occ_to_rosbag.py output/指定文件夹
+
+# 合并可视化（3×2 网格图、GIF、MP4）
+python tools/compose_viz.py output/指定文件夹
+python tools/compose_viz.py output/指定文件夹 --format gif
+python tools/compose_viz.py output/指定文件夹 --format video
 ```
 
 ## 配置结构

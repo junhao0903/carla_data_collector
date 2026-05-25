@@ -22,5 +22,5 @@ transform:           # mount position relative to ego vehicle
   pitch: 0.0
   yaw: 0.0
 
-output: false        # 是否输出点云数据到 output 目录 (含可视化)
+output: false         # 输出点云 + 标注，供后处理 annotation 过滤使用
 min_points: 10       # bbox with fewer points is discarded

@@ -122,22 +122,20 @@ class DataCollector:
         self._init_annotations()
         print(f"Attached sensors: {', '.join(self._sensors.keys())}")
 
-        # Sync tick: ensure all sensors (especially derived depth/semantic)
-        # fire at least once so frame counts align across modalities
-        if sync:
-            self._world.tick()
-
         duration = self._config.get("collection", {}).get("duration_seconds", 0)
         start_time = time.time()
         try:
             while True:
                 if sync:
-                    frame = self._world.tick()
+                    from .sensors import set_world_frame
+                    frame = self._world.get_snapshot().frame + 1
+                    set_world_frame(frame)
+                    self._world.tick()
                 else:
                     time.sleep(1.0 / fps)
                     frame = self._world.get_snapshot().frame
 
-                self._write_annotations_for_new_frames()
+                self._write_annotations_for_new_frames(frame)
                 self._record_ego_pose(frame)
                 self._save_occ_gt_data(frame)
 
@@ -333,7 +331,8 @@ class DataCollector:
             points[:, 1] = -points[:, 1]
             _sensor_data[channel] = points
             if save_dir is not None:
-                np.save(os.path.join(save_dir, f"{data.frame:08d}.npy"), points)
+                from .sensors import _current_world_frame
+                np.save(os.path.join(save_dir, f"{_current_world_frame:08d}.npy"), points)
 
         sensor.listen(_filter_lidar_cb)
         self._filter_lidar = sensor
@@ -416,7 +415,7 @@ class DataCollector:
             with open(os.path.join(self._output_dir, "OCC", "occ_metadata.json"), "w") as _f:
                 _json.dump(occ_cfg, _f)
 
-    def _write_annotations_for_new_frames(self):
+    def _write_annotations_for_new_frames(self, world_frame):
         from .sensors import get_sensor_frames, get_sensor_data
 
         # Snapshot lidar data once to avoid race with callback threads
@@ -444,41 +443,45 @@ class DataCollector:
 
         for spec in self._camera_specs:
             channel = spec["channel"]
-            frame = get_sensor_frames().get(channel)
-            if frame is None:
-                continue
+            sensor_frame = get_sensor_frames().get(channel)
+            # Use world tick frame for filename — unified naming
             ann_path = os.path.join(
-                self._frame_annotations[channel]["dir"], f"{frame:08d}.json"
+                self._frame_annotations[channel]["dir"], f"{world_frame:08d}.json"
             )
             if os.path.exists(ann_path):
                 continue
-            # Only use lidar filter if lidar frame is close to camera frame
-            lidar_frame = get_sensor_frames().get(self._filter_lidar_channel)
-            if lidar_frame is None and self._lidar_specs:
-                lidar_frame = get_sensor_frames().get(self._lidar_specs[0]["channel"])
-            if lidar_frame is not None and abs(lidar_frame - frame) <= 2:
-                lp, mp = lidar_points, min_pts
+            if sensor_frame is not None:
+                lidar_frame = get_sensor_frames().get(self._filter_lidar_channel)
+                if lidar_frame is None and self._lidar_specs:
+                    lidar_frame = get_sensor_frames().get(self._lidar_specs[0]["channel"])
+                if lidar_frame is not None and abs(lidar_frame - sensor_frame) <= 2:
+                    lp, mp = lidar_points, min_pts
+                else:
+                    lp, mp = None, 0
+                self._write_annotations(sensor_frame, spec, channel, ann_path, lp, mp, ego_tf, lidar_tf)
             else:
-                lp, mp = None, 0
-            self._write_annotations(frame, spec, channel, ann_path, lp, mp, ego_tf, lidar_tf)
+                # First tick: save empty annotation so frame count matches
+                import json as _json
+                with open(ann_path, "w") as _f:
+                    _json.dump([], _f)
 
         for spec in self._lidar_specs:
             channel = spec["channel"]
-            frame = get_sensor_frames().get(channel)
-            if frame is None:
+            sensor_frame = get_sensor_frames().get(channel)
+            if sensor_frame is None:
                 continue
             ann_dir = os.path.join(self._output_dir, channel, "annotations")
-            ann_path = os.path.join(ann_dir, f"{frame:08d}.json")
+            ann_path = os.path.join(ann_dir, f"{world_frame:08d}.json")
             if os.path.exists(ann_path):
                 continue
-            self._write_lidar_annotations(ann_path, channel, spec, frame, lidar_points, min_pts, ego_tf, lidar_tf)
+            self._write_lidar_annotations(ann_path, channel, spec, sensor_frame, lidar_points, min_pts, ego_tf, lidar_tf)
 
         # Write filter LiDAR annotations if output enabled
         if self._filter_lidar is not None and self._config.get("_filter_config", {}).get("output", False):
             filter_frame = get_sensor_frames().get(self._filter_lidar_channel)
             if filter_frame is not None:
                 ann_dir = os.path.join(self._output_dir, "LIDAR_FILTER", "annotations")
-                ann_path = os.path.join(ann_dir, f"{filter_frame:08d}.json")
+                ann_path = os.path.join(ann_dir, f"{world_frame:08d}.json")
                 if not os.path.exists(ann_path):
                     filter_cfg = self._config.get("_filter_config", {})
                     filter_spec = {

@@ -114,7 +114,8 @@ sensors:
     channel: OCC
     modality: occupancy
     enabled: true
-    occ_vis: true       # 是否生成 OCC BEV 可视化
+    occ_vis: true           # OCC BEV 可视化
+    projection_vis: true    # OCC 投影可视化（俯瞰视角）
     rate_hz: 20
     transform:
       x: 0.0

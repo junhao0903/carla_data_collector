@@ -152,6 +152,72 @@ def fill_road_from_waypoints(occ, world, pc_range=None, voxel_size=None,
         slab[slab == 0] = tag
 
 
+def fill_vegetation_occ(occ, bbox, pc_range=None, voxel_size=None):
+    """Fill vegetation with trunk+crown heuristic instead of full bbox.
+
+    Lower bbox (0–45% height): thin central cylinder (trunk, 8% of min width).
+    Upper bbox (35%+ height): full crown region.
+    Does not overwrite existing road/sidewalk voxels.
+    """
+    if pc_range is None:
+        pc_range = PC_RANGE
+    if voxel_size is None:
+        voxel_size = VOXEL_SIZE
+
+    try:
+        import carla
+        verts = bbox.get_world_vertices(carla.Transform())
+    except (ImportError, NameError):
+        import carla
+        verts = bbox.get_world_vertices(carla.Transform())
+
+    xs = [v.x for v in verts]
+    ys = [v.y for v in verts]
+    zs = [v.z for v in verts]
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
+    z_min, z_max = min(zs), max(zs)
+
+    width_x = x_max - x_min
+    width_y = y_max - y_min
+    height = z_max - z_min
+    if height <= 0:
+        return
+
+    cx = (x_min + x_max) * 0.5
+    cy = (y_min + y_max) * 0.5
+
+    trunk_radius = min(width_x, width_y) * 0.08
+    trunk_radius2 = trunk_radius * trunk_radius
+    trunk_z_max = z_min + height * 0.45
+    crown_z_min = z_min + height * 0.35
+
+    # Voxel index range
+    ix0 = max(0, int((x_min - pc_range[0]) / voxel_size[0]))
+    ix1 = min(occ.shape[0] - 1, int((x_max - pc_range[0]) / voxel_size[0]))
+    iy0 = max(0, int((y_min - pc_range[1]) / voxel_size[1]))
+    iy1 = min(occ.shape[1] - 1, int((y_max - pc_range[1]) / voxel_size[1]))
+    iz0 = max(0, int((z_min - pc_range[2]) / voxel_size[2]))
+    iz1 = min(occ.shape[2] - 1, int((z_max - pc_range[2]) / voxel_size[2]))
+    if ix0 > ix1 or iy0 > iy1 or iz0 > iz1:
+        return
+
+    for iz in range(iz0, iz1 + 1):
+        z = pc_range[2] + (iz + 0.5) * voxel_size[2]
+        for iy in range(iy0, iy1 + 1):
+            y = pc_range[1] + (iy + 0.5) * voxel_size[1]
+            dy = y - cy
+            for ix in range(ix0, ix1 + 1):
+                x = pc_range[0] + (ix + 0.5) * voxel_size[0]
+                dx = x - cx
+                in_trunk = (dx * dx + dy * dy <= trunk_radius2 and z <= trunk_z_max)
+                in_crown = (z >= crown_z_min)
+                if not (in_trunk or in_crown):
+                    continue
+                if occ[ix, iy, iz] == 0:
+                    occ[ix, iy, iz] = 9
+
+
 def fill_static_bbox(occ, bbox, tag, pc_range=None, voxel_size=None):
     """Fill voxels inside a CARLA level_bbs BoundingBox (AABB in world frame)."""
     if pc_range is None:
@@ -211,9 +277,14 @@ def build_static_occ(world, pc_range=None, voxel_size=None, occ_shape=None):
             bbs = world.get_level_bbs(obj_label)
         except RuntimeError:
             continue
-        print(f"  Filling {len(bbs)} {str(obj_label).split('.')[-1]} (tag={tag})...")
+        is_veg = str(obj_label).endswith("Vegetation")
+        print(f"  Filling {len(bbs)} {str(obj_label).split('.')[-1]} (tag={tag})" +
+              (" (trunk+crown)" if is_veg else "") + "...")
         for bb in bbs:
-            fill_static_bbox(occ, bb, tag, pc_range, voxel_size)
+            if is_veg:
+                fill_vegetation_occ(occ, bb, pc_range, voxel_size)
+            else:
+                fill_static_bbox(occ, bb, tag, pc_range, voxel_size)
 
     return occ
 
