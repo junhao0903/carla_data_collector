@@ -22,5 +22,6 @@ transform:           # mount position relative to ego vehicle
   pitch: 0.0
   yaw: 0.0
 
-output: false         # 输出点云 + 标注，供后处理 annotation 过滤使用
-min_points: 10       # bbox with fewer points is discarded
+output: true          # 输出点云 + 标注，供后处理 annotation 过滤使用
+min_points: 3         # bbox with fewer points is discarded
+temporal_window: 0.5  # seconds: if kept in this window, force-keep in subsequent frames

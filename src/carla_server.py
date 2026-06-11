@@ -1,9 +1,9 @@
 import os
+import glob
 import signal
 import subprocess
-import time
 import sys
-import glob
+import time
 from pathlib import Path
 
 
@@ -11,17 +11,17 @@ class CarlaConnectionError(RuntimeError):
     pass
 
 
-def _resolve_carla_path(launch_command):
-    """从 launch_command 脚本路径反推 CARLA 安装目录"""
-    if not launch_command:
-        raise CarlaConnectionError("launch_command is empty, cannot resolve CARLA path")
-    script = Path(launch_command[0]).expanduser()
-    if not script.exists():
-        raise CarlaConnectionError(f"CARLA launch script not found: {script}")
-    return str(script.resolve().parent)
-
-
-def _import_carla(carla_path):
+def _import_carla(carla_path=None):
+    """Import CARLA — try environment first, fall back to .egg from CARLA path."""
+    try:
+        import carla
+        return carla
+    except ImportError:
+        pass
+    if carla_path is None:
+        raise CarlaConnectionError(
+            "CARLA Python API not found. Install via pip/conda or set launch_command in config."
+        )
     egg_dir = os.path.join(carla_path, "PythonAPI", "carla", "dist")
     eggs = glob.glob(os.path.join(egg_dir, "carla-*py3.7*.egg"))
     if not eggs:
@@ -32,9 +32,11 @@ def _import_carla(carla_path):
         sys.path.insert(0, eggs[0])
     try:
         import carla
+        return carla
     except ImportError:
-        raise CarlaConnectionError("Unable to import CARLA Python API.")
-    return carla
+        raise CarlaConnectionError(
+            "CARLA Python API not found. Install via pip/conda or set launch_command in config."
+        )
 
 
 class CarlaServer:
@@ -49,7 +51,11 @@ class CarlaServer:
         self._process = None
         self._pgid = None
         self._owns_process = False
-        carla_path = _resolve_carla_path(self._launch_command)
+        carla_path = None
+        if self._launch_command:
+            script = Path(self._launch_command[0]).expanduser()
+            if script.exists():
+                carla_path = str(script.resolve().parent)
         self._carla = _import_carla(carla_path)
         self._client = None
         self._world = None

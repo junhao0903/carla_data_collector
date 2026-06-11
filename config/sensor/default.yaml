@@ -1,0 +1,150 @@
+description: "Front 3-camera test layout"
+trajectory_vis: true   # 轨迹可视化
+sensors:
+  - id: cam_front
+    channel: CAM_FRONT
+    modality: camera_rgb
+    blueprint: sensor.camera.rgb
+    enabled: true
+    rate_hz: 20
+    depth: true         # 生成深度图
+    depth_vis: true        # 深度图可视化
+    semantic: true         # 生成语义分割图
+    semantic_vis: true     # 语义分割可视化
+    annotation_vis: true   # 标注可视化
+    transform:
+      x: 1.5
+      y: 0.0
+      z: 1.6
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+    output:
+      width: 1600
+      height: 900
+      fov: 70
+#      fx: 1142.5
+#      fy: 1146.0
+#      cx: 800.0
+#      cy: 450.0
+
+  - id: cam_front_left
+    channel: CAM_FRONT_LEFT
+    modality: camera_rgb
+    blueprint: sensor.camera.rgb
+    enabled: true
+    rate_hz: 20
+    depth: true
+    semantic: true
+    semantic_vis: true
+    annotation_vis: true
+    transform:
+      x: 1.5
+      y: 0.55         # Y+=left, so 0.55m left
+      z: 1.6
+      roll: 0.0
+      pitch: 0.0
+      yaw: 55.0        # yaw+=left
+    output:
+      width: 1600
+      height: 900
+      fov: 70
+#      fx: 1142.5
+#      fy: 1146.0
+#      cx: 800.0
+#      cy: 450.0
+
+  - id: cam_front_right
+    channel: CAM_FRONT_RIGHT
+    modality: camera_rgb
+    blueprint: sensor.camera.rgb
+    enabled: true
+    rate_hz: 20
+    depth: true
+    semantic: true
+    semantic_vis: true
+    annotation_vis: true
+    transform:
+      x: 1.5
+      y: -0.55        # Y+=left, so -0.55m = 0.55m right
+      z: 1.6
+      roll: 0.0
+      pitch: 0.0
+      yaw: -55.0       # yaw+=left, negative=right turn
+    output:
+      width: 1600
+      height: 900
+      fov: 70
+#      fx: 1142.5
+#      fy: 1146.0
+#      cx: 800.0
+#      cy: 450.0
+  
+  - id: lidar_top_semantic
+    channel: LIDAR_TOP
+    modality: lidar_semantic
+    blueprint: sensor.lidar.ray_cast_semantic
+    enabled: true
+    rate_hz: 12
+    transform:
+      x: 0.0
+      y: 0.0
+      z: 1.8
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+    output:
+      channels: 128
+      range: 200
+      points_per_second: 3200000
+      rotation_frequency: 20
+      upper_fov: 10       # 上视场角 (度)
+      lower_fov: -30      # 下视场角 (度)
+      horizontal_fov: 360 # 水平视场角 (度), 360=旋转式, 120=左右各60°
+
+  - id: gnss
+    channel: GNSS
+    modality: gnss
+    blueprint: sensor.other.gnss
+    enabled: true
+    rate_hz: 20
+    transform:
+      x: 0.0
+      y: 0.0
+      z: 2.0
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+
+  - id: imu
+    channel: IMU
+    modality: imu
+    blueprint: sensor.other.imu
+    enabled: true
+    rate_hz: 20
+    transform:
+      x: 0.0
+      y: 0.0
+      z: 2.0
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+
+  - id: occ_grid
+    channel: OCC
+    modality: occupancy
+    enabled: true
+    occ_vis: true           # OCC BEV 可视化
+    projection_vis: true    # OCC 投影可视化（俯瞰视角）
+    rate_hz: 20
+    transform:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+    output:
+      pc_range: [-50.0, -50.0, -5.0, 50.0, 50.0, 10.0]
+      voxel_size: [0.5, 0.5, 0.5]
+      static_occ_dir: "map"

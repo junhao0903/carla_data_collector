@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
-import os
-import sys
-import yaml
+import os, sys, subprocess, time, yaml
 from src.carla_server import CarlaServer, CarlaConnectionError
 from src.collector import DataCollector
+
+CARLA_START_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "scripts", "start_carla.sh")
+
+
+def _start_carla():
+    proc = subprocess.Popen(
+        ["bash", CARLA_START_SCRIPT],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print("Waiting for CARLA to be ready...")
+    ret = proc.wait()
+    if ret != 0:
+        raise RuntimeError(f"CARLA start script failed with exit code {ret}")
 
 
 def load_config(config_path):
@@ -43,6 +54,28 @@ def main():
         config_path = config_name
 
     config = load_config(config_path)
+
+    # Always start from a clean state: kill any leftover CARLA, then launch.
+    started_by_us = True
+    stop_script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "scripts", "stop_carla.sh")
+    subprocess.run(["bash", stop_script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _start_carla()
+
+    # CARLA port may be open but server not yet ready for RPC — poll until alive
+    import carla
+    client = None
+    for _ in range(30):
+        try:
+            client = carla.Client(config["carla"]["host"], config["carla"]["port"])
+            client.set_timeout(3)
+            client.get_server_version()
+            break
+        except RuntimeError:
+            time.sleep(1)
+    else:
+        raise RuntimeError("CARLA did not become responsive within 30s")
+
     server = CarlaServer(config)
 
     try:
@@ -51,6 +84,12 @@ def main():
     except CarlaConnectionError:
         server.shutdown()
         raise
+    finally:
+        if started_by_us:
+            stop_script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       "scripts", "stop_carla.sh")
+            subprocess.run(["bash", stop_script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print("CARLA stopped.")
 
 
 if __name__ == "__main__":

@@ -130,6 +130,9 @@ def load_camera_intrinsics(run_dir, channel):
                 if s.get("channel") == channel and s.get("modality") == "camera_rgb":
                     out = s.get("output", {})
                     w, h = out.get("width", 1600), out.get("height", 900)
+                    if "fx" in out:
+                        return {"fx": out["fx"], "fy": out["fy"], "cx": out["cx"], "cy": out["cy"],
+                                "width": w, "height": h}
                     hfov = m.radians(out.get("fov", 70))
                     fx = w / (2 * m.tan(hfov / 2))
                     vfov = 2 * m.atan(m.tan(hfov / 2) * h / w)

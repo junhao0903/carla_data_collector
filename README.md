@@ -20,14 +20,17 @@ bash scripts/stop_carla.sh         # 停止 CARLA
 python run.py config/main/other.yaml
 ```
 
-## 后处理可视化
+## 后处理
 
-采完数据后，可单独运行后处理：
+采集完成后自动运行后处理，也可单独运行：
 
 ```bash
 # 全部可视化（BEV/OCC/深度/语义/标注/投影/轨迹，遵循 sensor_layout.yaml 中 vis 开关）
-python tools/npy2jpg.py output/指定文件夹
-python tools/npy2jpg.py output/指定文件夹 --all          # 忽略 vis 开关，强制全开
+python tools/visualize.py output/指定文件夹
+python tools/visualize.py output/指定文件夹 --all          # 忽略 vis 开关，强制全开
+
+# 仅做数据转换（深度解码、语义PNG、LiDAR标注），不做可视化
+python tools/post_process.py output/指定文件夹
 
 # 单独 OCC 投影（默认俯瞰视角）
 python tools/occ_projection.py output/指定文件夹
@@ -112,39 +115,52 @@ output/<YYYYMMDD_HHMMSS>/
 
 ## 坐标系
 
-统一使用 **前-X / 左-Y / 上-Z** 左手坐标系。
+统一使用 **右手坐标系**：**X=前, Y=左, Z=上**（标准自动驾驶坐标系，与 nuScenes/KITTI 一致）。
+
+右手螺旋定则判定旋转正方向：拇指指向轴正方向，四指弯曲方向即为正旋转方向。
+
+| 旋转 | 绕轴 | 拇指指向 | 正方向效果 |
+|------|------|----------|-----------|
+| Roll | X（前） | 前 | **右翼下沉** |
+| Pitch | Y（左） | 左 | **低头** (nose down) |
+| Yaw | Z（上） | 上 | **左转** (逆时针俯视) |
 
 ### 各数据坐标系速查
 
-| 数据 | X | Y | Z | roll(+) | pitch(+) | yaw(+) | 原点 |
+| 数据 | X | Y | Z | Roll+ | Pitch+ | Yaw+ | 原点 |
 |------|---|---|---|---------|---------|--------|------|
-| LiDAR 点云 | 前 | 左 | 上 | — | — | — | LiDAR传感器 |
-| LiDAR 标注 | 前 | 左 | 上 | 左翼下沉 | 抬头 | 机头左转 | 自车 |
-| CAM 标注 (world) | 前 | 右(CARLA) | 上 | 右翼下沉(CARLA) | 抬头 | 机头右转(CARLA) | CARLA世界 |
-| CAM 标注 (camera) | 前 | 左 | 上 | 左翼下沉(相对) | 抬头(相对) | 机头左转(相对) | 相机 |
-| OCC 标注 | 前 | 左 | 上 | 左翼下沉 | 抬头 | 机头左转 | 自车 |
-| ego_trajectory | 前 | 左 | 上 | 左翼下沉 | 抬头 | 机头左转 | CARLA世界 |
+| LiDAR 点云 | 前 | 左 | 上 | — | — | — | LiDAR 传感器 |
+| LiDAR 标注 | 前 | 左 | 上 | 右翼下沉 | 低头 | 左转(相对) | LiDAR 传感器 |
+| CAM 标注 | 前 | 左 | 上 | 右翼下沉(相对) | 低头(相对) | 左转(相对) | 相机传感器 |
+| OCC 标注 | 前 | 左 | 上 | 右翼下沉 | 低头 | 左转(相对) | 自车中心 |
+| OCC 栅格 | 前 | 左 | 上 | — | — | — | 自车中心 |
+| ego_trajectory | 前 | 左 | 上 | 右翼下沉 | 低头 | 左转 | 全局原点 |
 | IMU accel | 前 | 左 | 上 | — | — | — | 车体 |
-| IMU gyro | 前(左滚+) | 左(抬头+) | 上(左转+) | — | — | — | 车体 |
+| IMU gyro | — | — | — | 右翼下沉+ | 低头+ | 左转+ | 车体 |
 | GNSS | — | — | — | — | — | — | WGS84 |
-| OCC 栅格 | 前 | 左 | 上 | — | — | — | 自车 |
+
+### 传感器配置坐标约定
+
+`config/sensor/*.yaml` 中的 `transform` 也使用右手坐标系：
+- `y`: **Y+=左**（例如 `y: 0.55` = 传感器在自车左侧 0.55m）
+- `yaw`: **yaw+=左转**（例如 `yaw: 55` = 传感器向左偏 55°）
+- 代码内部自动转换为 CARLA 原生坐标系（Y=右, yaw+=右转）
 
 ### CARLA 世界 → 本系统变换
 
-CARLA (Unreal) 原始坐标系: X=前, Y=**右**, Z=上, roll=右翼下沉, yaw=机头右转 (右手系)
+CARLA (Unreal) 原生坐标系为**左手系**：X=前, Y=**右**, Z=上, yaw+=**右转**
 
-变换规则: **Y 取负, roll 取负, yaw 取负, pitch 不变**
+变换规则：**Y 取负, roll 取负, yaw 取负, pitch 不变**
 
 ### 标注 location 说明
 
 - **动态 actor**: `location.z` = 几何中心 (pivot地面 + half_height)
-- **静态 BBs**: `location.z` = 几何中心 (`bb.location.z`)
-- **相机帧 Z**: `loc_world.z - cam.z + bbox_height/2` = 几何中心相对相机
-- **OCC 标注 extent**: 半尺寸 (`bbox.extent`)，`x/y/z` = 半长/半宽/半高
-
+- **静态 BBs**: `location.z` = 几何中心 (`bb.location.z - bb.extent.z + half_height`)
+- **相机标注**: location/rotation/velocity 均相对于相机传感器（非全局坐标）
+- **LiDAR 标注**: location/rotation/velocity 均相对于 LiDAR 传感器（非自车中心）
 ### bbox_3d 格式
 
-`{"x": full_length, "y": full_width, "z": full_height}` — 完整尺寸 (extent × 2)，仅相机/LiDAR 标注使用
+`{"x": full_length, "y": full_width, "z": full_height}` — 完整尺寸 (extent × 2)，所有标注（相机/LiDAR/OCC）统一使用
 
 ### bbox_2d 格式 (仅相机标注)
 

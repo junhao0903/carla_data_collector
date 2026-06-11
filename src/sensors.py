@@ -289,16 +289,25 @@ def _attach_semantic_lidar(world, vehicle, bp_lib, spec, transform, save_dir):
     bp.set_attribute("sensor_tick", str(1.0 / rate))
 
     sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
-    sensor.listen(_semantic_lidar_callback(save_dir, spec["channel"]))
+    sensor.listen(_semantic_lidar_callback(save_dir, spec["channel"], sensor))
     return sensor
 
 
-def _semantic_lidar_callback(save_dir, channel):
+def _semantic_lidar_callback(save_dir, channel, sensor):
     def cb(data):
         _sensor_frames[channel] = data.frame
         points = np.frombuffer(data.raw_data, dtype=np.float32).copy()
         points = points.reshape((-1, 6))  # x, y, z, cos_angle, obj_tag, obj_idx
-        points[:, 1] = -points[:, 1]  # Y: right → left (standard)
+        # Convert from CARLA world to sensor-local frame (X=fwd, Y=left, Z=up)
+        t = sensor.get_transform()
+        sx, sy, sz = t.location.x, t.location.y, t.location.z
+        yaw = math.radians(t.rotation.yaw)
+        cy, syaw = math.cos(yaw), math.sin(yaw)
+        dx = points[:, 0] - sx
+        dy = points[:, 1] - sy
+        points[:, 0] = dx * cy + dy * syaw
+        points[:, 1] = -(dx * syaw - dy * cy)
+        points[:, 2] = points[:, 2] - sz
         _sensor_data[channel] = points
         np.save(os.path.join(save_dir, f"{_current_world_frame:08d}.npy"), points)
 

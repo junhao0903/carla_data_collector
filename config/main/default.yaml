@@ -8,11 +8,6 @@ carla:
   map: Town10HD             # 要加载的地图 (Town01–Town07, Town10HD)
   weather: ClearNoon       # 天气预设 (ClearNoon, CloudyNoon, HardRainNoon, WetSunset...)
   fps: 20                  # 同步模式下的仿真帧率
-  auto_launch: false       # 不在 run.py 中启动 CARLA (推荐手动启动后直连)
-  startup_wait_seconds: 180  # 等待 CARLA 启动的最大秒数
-  launch_command:          # CARLA 启动命令sh
-    - /home/adt/script/carlaUE4.sh
-    - -RenderOffScreen     # 无头渲染（不显示窗口）
 
 vehicle:
   model: model3            # 自车车型 (对应 blueprint: vehicle.tesla.model3)
@@ -24,7 +19,7 @@ traffic:
 
 collection:
   output_dir: output       # 数据输出根目录
-  duration_seconds: 30      # 采集时长 (秒), 0 = 不限时, Ctrl+C 退出
+  duration_seconds: 10      # 采集时长 (秒), 0 = 不限时, Ctrl+C 退出
   synchronous: true        # 同步模式 (建议开启, 保证数据帧率稳定)
   warmup_ticks: 10         # 预热 ticks (传感器稳定期, 不记录数据)
   motion_speed_kmh: 5       # 车速达到此值 (km/h) 开始采集
@@ -32,6 +27,6 @@ collection:
   motion_timeout_ticks: 500     # 等待加速的最大 tick 数
 
 ground_truth:
-  annotation_filter: default.yaml    # LiDAR 配置 (config/filter/), 用于过滤无效 annotation
+  annotation_filter: default.yaml    # 过滤 LiDAR 配置 (config/filter/)
 
-sensor_layout: nuscenes.yaml  # 传感器布局文件 (自动查找 config/sensor/ 目录)
+sensor_layout: default.yaml  # 传感器布局文件 (自动查找 config/sensor/ 目录)
