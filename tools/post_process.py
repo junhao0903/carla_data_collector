@@ -306,6 +306,37 @@ def align_frames(run_dir):
             print(f"  CSV trimmed: {os.path.relpath(csv_path, run_dir)} ({len(lines) - len(kept)} rows)")
 
 
+def _to_sensor_local(ax_ad, ay_ad, az_ad, aroll_ad, apitch_ad, ayaw_ad, ego, lidar_offsets):
+    """Convert global AD annotation to sensor-local (X=fwd, Y=left, Z=up)."""
+    ex_ad, ey_ad, ez_ad, eroll, epitch, eyaw = ego
+    lx_off, ly_off, lz_off, lroll_off, lpitch_off, lyaw_off = lidar_offsets
+    eyaw_r = m.radians(eyaw); ce, se = m.cos(eyaw_r), m.sin(eyaw_r)
+    ep_r = m.radians(epitch); cp, sp = m.cos(ep_r), m.sin(ep_r)
+    er_r = m.radians(eroll); cr, sr = m.cos(er_r), m.sin(er_r)
+    dx = ax_ad - ex_ad; dy = ay_ad - ey_ad; dz = az_ad - ez_ad
+    x1 = dx * ce + dy * se; y1 = -dx * se + dy * ce; z1 = dz
+    x2 = x1 * cp - z1 * sp; y2 = y1; z2 = x1 * sp + z1 * cp
+    fx = x2; fy = y2 * cr + z2 * sr; fz = -y2 * sr + z2 * cr
+    sx = fx - lx_off; sy = fy - ly_off; sz = fz - lz_off
+    cly, sly = m.cos(lyaw_off), m.sin(lyaw_off)
+    clp, slp = m.cos(lpitch_off), m.sin(lpitch_off)
+    clr, slr = m.cos(lroll_off), m.sin(lroll_off)
+    xs1 = sx * cly + sy * sly; ys1 = -sx * sly + sy * cly; zs1 = sz
+    xs2 = xs1 * clp - zs1 * slp; ys2 = ys1; zs2 = xs1 * slp + zs1 * clp
+    xs3 = xs2; ys3 = ys2 * clr + zs2 * slr; zs3 = -ys2 * slr + zs2 * clr
+    return (xs3, ys3, zs3,
+            aroll_ad - eroll - m.degrees(lroll_off),
+            apitch_ad - epitch - m.degrees(lpitch_off),
+            ayaw_ad - eyaw - m.degrees(lyaw_off))
+
+
+def _count_points(pts, sx, sy, sz, ayaw_s, hx, hy, hz):
+    dx = pts[:, 0] - sx; dy = pts[:, 1] - sy; dz = pts[:, 2] - sz
+    yaw = m.radians(ayaw_s); cr, sr = m.cos(yaw), m.sin(yaw)
+    lx = dx * cr + dy * sr; ly = -dx * sr + dy * cr
+    return int(((np.abs(lx) <= hx) & (np.abs(ly) <= hy) & (np.abs(dz) <= hz)).sum())
+
+
 def overall_filter_annotations(run_dir):
     """LiDAR point-count + temporal filtering."""
     filter_cfg = _load_filter_config()
@@ -324,6 +355,8 @@ def overall_filter_annotations(run_dir):
         return
     out_dir = os.path.join(run_dir, "LIDAR_FILTER", "annotations")
     os.makedirs(out_dir, exist_ok=True)
+    valid_dir = os.path.join(run_dir, "ANNO", "valid")
+    os.makedirs(valid_dir, exist_ok=True)
 
     # Load ego poses in AD coords (X=fwd, Y=left) and LiDAR offset
     ego_ad = {}
@@ -335,10 +368,14 @@ def overall_filter_annotations(run_dir):
                     float(row["x"]), float(row["y_left"]), float(row["z"]),
                     float(row["roll_left"]), float(row["pitch"]), float(row["yaw_left"]))
     lidar_tf = filter_cfg.get("transform", {})
-    lx_off = lidar_tf.get("x", 0.0)
-    ly_off = lidar_tf.get("y", 0.0)
-    lz_off = lidar_tf.get("z", 1.8)
-    lyaw_off = m.radians(lidar_tf.get("yaw", 0.0))
+    lidar_offsets = (
+        lidar_tf.get("x", 0.0),
+        lidar_tf.get("y", 0.0),
+        lidar_tf.get("z", 1.8),
+        m.radians(lidar_tf.get("roll", 0.0)),
+        m.radians(lidar_tf.get("pitch", 0.0)),
+        m.radians(lidar_tf.get("yaw", 0.0)),
+    )
 
     # Load static bboxes (global AD coords)
     static_bboxes = []
@@ -350,23 +387,6 @@ def overall_filter_annotations(run_dir):
     ann_files = sorted(glob.glob(os.path.join(ann_dir, "*.json")))
     if not ann_files:
         return
-
-    def _to_sensor_local(ax_ad, ay_ad, az_ad, ayaw_ad, ego):
-        ex_ad, ey_ad, ez_ad, _, _, eyaw = ego
-        eyaw_r = m.radians(eyaw); ce, se = m.cos(eyaw_r), m.sin(eyaw_r)
-        fx = (ax_ad - ex_ad) * ce + (ay_ad - ey_ad) * se
-        fy = -((ax_ad - ex_ad) * se - (ay_ad - ey_ad) * ce)
-        fz = az_ad - ez_ad
-        sx = fx - lx_off; sy = fy - ly_off; sz = fz - lz_off
-        cly, sly = m.cos(lyaw_off), m.sin(lyaw_off)
-        return (sx * cly + sy * sly, -(sx * sly - sy * cly), sz,
-                ayaw_ad - eyaw - m.degrees(lyaw_off))
-
-    def _count_points(pts, sx, sy, sz, ayaw_s, hx, hy, hz):
-        dx = pts[:, 0] - sx; dy = pts[:, 1] - sy; dz = pts[:, 2] - sz
-        yaw = m.radians(ayaw_s); cr, sr = m.cos(yaw), m.sin(yaw)
-        lx = dx * cr + dy * sr; ly = -dx * sr + dy * cr
-        return int(((np.abs(lx) <= hx) & (np.abs(ly) <= hy) & (np.abs(dz) <= hz)).sum())
 
     def _category(type_id):
         if str(type_id).startswith("vehicle."): return "vehicle"
@@ -401,13 +421,17 @@ def overall_filter_annotations(run_dir):
                 hy = max(bb.get("y", 2.0) / 2, 0.5)
                 hz = max(bb.get("z", 2.0) / 2, 0.5)
                 if ego is not None:
-                    sx, sy, sz, ayaw_s = _to_sensor_local(
+                    rot = a.get("rotation", {})
+                    sx, sy, sz, sroll, spitch, syaw = _to_sensor_local(
                         a["location"]["x"], a["location"]["y"], a["location"]["z"],
-                        a.get("rotation", {}).get("yaw", 0), ego)
+                        rot.get("roll", 0), rot.get("pitch", 0), rot.get("yaw", 0),
+                        ego, lidar_offsets)
                 else:
                     sx, sy, sz = a["location"]["x"], a["location"]["y"], a["location"]["z"]
-                    ayaw_s = a.get("rotation", {}).get("yaw", 0)
-                n = _count_points(pts, sx, sy, sz, ayaw_s, hx, hy, hz)
+                    sroll = a.get("rotation", {}).get("roll", 0)
+                    spitch = a.get("rotation", {}).get("pitch", 0)
+                    syaw = a.get("rotation", {}).get("yaw", 0)
+                n = _count_points(pts, sx, sy, sz, syaw, hx, hy, hz)
                 aid = a.get("actor_id", 0)
                 if n < min_pts and (not apply_temporal or aid not in temporal_keep):
                     occ_filtered_count += 1
@@ -420,6 +444,21 @@ def overall_filter_annotations(run_dir):
         if ego is not None:
             _filter_actors(static_bboxes, apply_temporal=False)
 
+        # Save global AD coords to ANNO/valid/
+        valid_path = os.path.join(valid_dir, f"{frame:08d}.json")
+        with open(valid_path, "w") as f:
+            json.dump(filtered, f)
+
+        # Convert to sensor-local AD for LIDAR_FILTER/annotations/
+        if ego is not None:
+            for a in filtered:
+                rot = a.get("rotation", {})
+                sx, sy, sz, sroll, spitch, syaw = _to_sensor_local(
+                    a["location"]["x"], a["location"]["y"], a["location"]["z"],
+                    rot.get("roll", 0), rot.get("pitch", 0), rot.get("yaw", 0),
+                    ego, lidar_offsets)
+                a["location"] = {"x": sx, "y": sy, "z": sz}
+                a["rotation"] = {"roll": sroll, "pitch": spitch, "yaw": syaw}
         out_path = os.path.join(out_dir, f"{frame:08d}.json")
         with open(out_path, "w") as f:
             json.dump(filtered, f)
@@ -483,6 +522,47 @@ def simulate_async(run_dir):
                 print(f"  {channel}/{sub}: kept {len(kept)}/{len(all_files)} (rate={rate}Hz)")
 
 
+def dedup_static_bboxes(run_dir):
+    """Remove static bboxes that overlap with dynamic actors in the first frame."""
+    static_path = os.path.join(run_dir, "ANNO", "static_bboxes.json")
+    if not os.path.exists(static_path):
+        return
+    dyn_dir = os.path.join(run_dir, "ANNO", "dynamic_actors")
+    if not os.path.isdir(dyn_dir):
+        return
+    # Get first frame's dynamic actors
+    dyn_files = sorted(os.listdir(dyn_dir))
+    if not dyn_files:
+        return
+    with open(os.path.join(dyn_dir, dyn_files[0])) as f:
+        dyn_actors = json.load(f)
+
+    # Get ego position from first frame trajectory
+    ego_pos = None
+    ego_csv = os.path.join(run_dir, "TRAJ", "ego_trajectory.csv")
+    if os.path.exists(ego_csv):
+        with open(ego_csv) as f:
+            for row in _csv.DictReader(f):
+                ego_pos = (float(row["x"]), float(row["y_left"]))
+                break
+
+    with open(static_path) as f:
+        static_bboxes = json.load(f)
+
+    before = len(static_bboxes)
+    static_bboxes = [sb for sb in static_bboxes
+                     if not any(((sb["location"]["x"] - a["location"]["x"])**2 +
+                                 (sb["location"]["y"] - a["location"]["y"])**2)**0.5 < 0.5
+                                for a in dyn_actors)
+                     and not (ego_pos is not None and
+                              ((sb["location"]["x"] - ego_pos[0])**2 +
+                               (sb["location"]["y"] - ego_pos[1])**2)**0.5 < 0.5)]
+    after = len(static_bboxes)
+    with open(static_path, "w") as f:
+        json.dump(static_bboxes, f)
+    print(f"  Static dedup: {before} → {after} ({before - after} removed)")
+
+
 def post_process(run_dir):
     layout = _load_sensor_layout(run_dir)
     steps = [
@@ -490,6 +570,7 @@ def post_process(run_dir):
         ("Depth", lambda: convert_depth(run_dir)),
         ("Original", lambda: convert_orin(run_dir, 95)),
         ("OCC", lambda: generate_occ(run_dir, layout)),
+        ("Static Dedup", lambda: dedup_static_bboxes(run_dir)),
         ("Async Sim", lambda: simulate_async(run_dir)),
         ("Align Frames", lambda: align_frames(run_dir)),
         ("Remap IDs", lambda: remap_static_ids(run_dir)),

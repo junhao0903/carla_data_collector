@@ -115,24 +115,15 @@ def _camera_annotation_viz(run_dir, layout, force_all=False):
               "static_bus": (255, 100, 0), "static_train": (255, 50, 0),
               "static_motorcycle": (255, 200, 50), "static_bicycle": (255, 200, 100),
               "static_pedestrian": (200, 100, 255)}
-    ann_dir = os.path.join(run_dir, "ANNO", "dynamic_actors")
-    if not os.path.isdir(ann_dir):
-        return
 
     from tools.occ_projection import load_camera_intrinsics
-    ego_csv = os.path.join(run_dir, "TRAJ", "ego_trajectory.csv")
-    poses = {}
-    if os.path.exists(ego_csv):
-        with open(ego_csv) as f:
-            import csv as _csv
-            for row in _csv.DictReader(f):
-                poses[int(row["frame"])] = (
-                    float(row["x"]), -float(row["y_left"]), float(row["z"]),
-                    -float(row["roll_left"]), float(row["pitch"]), -float(row["yaw_left"]))
 
     for cam_dir in sorted(glob.glob(os.path.join(run_dir, "CAM_*"))):
         channel = os.path.basename(cam_dir)
         if not force_all and not _cam_vis_enabled(layout, channel, "annotation_vis", True):
+            continue
+        ann_dir = os.path.join(cam_dir, "annotations")
+        if not os.path.isdir(ann_dir):
             continue
         orin_dir = os.path.join(cam_dir, "original")
         if not os.path.isdir(orin_dir):
@@ -151,9 +142,28 @@ def _camera_annotation_viz(run_dir, layout, force_all=False):
             ann_path = os.path.join(ann_dir, f"{frame:08d}.json")
             if not os.path.exists(ann_path):
                 continue
-            if frame not in poses:
-                continue
-            ex, ey, ez, er, ep, eyaw = poses[frame]
+            with open(ann_path) as f:
+                anns = json.load(f)
+            if img_path.endswith(".npy"):
+                arr = np.load(img_path)
+                img = Image.fromarray(arr[:, :, [2, 1, 0]])
+            else:
+                img = Image.open(img_path).copy()
+            draw = ImageDraw.Draw(img)
+            for a in anns:
+                loc = a.get("location"); bbox = a.get("bbox_2d")
+                if loc is None or bbox is None:
+                    continue
+                # annotation in camera frame — project to pixel
+                cam_X = loc["x"]; cam_Y = loc["y"]; cam_Z = loc["z"]
+                if cam_X <= 0.1:
+                    continue
+                u = int(K["fx"] * cam_Y / cam_X + K["cx"])
+                v = int(K["fy"] * (-cam_Z) / cam_X + K["cy"])
+                color = COLORS.get(a.get("category", "vehicle"), (0, 255, 0))
+                r = 4
+                draw.ellipse([u-r, v-r, u+r, v+r], fill=color)
+            img.save(os.path.join(viz_dir, fname))
             with open(ann_path) as f:
                 anns = json.load(f)
             if img_path.endswith(".npy"):
@@ -197,32 +207,11 @@ def _lidar_annotation_viz(run_dir, layout, force_all=False):
               "static_car": (255, 200, 0), "static_truck": (255, 150, 0),
               "static_bus": (255, 100, 0), "static_motorcycle": (255, 200, 50),
               "static_bicycle": (255, 200, 100)}
-    ann_dir = os.path.join(run_dir, "ANNO", "dynamic_actors")
-    if not os.path.isdir(ann_dir):
-        return
-
-    # LiDAR offset lookup from sensor layout (AD coords: X=fwd, Y=left)
-    lidar_offsets = {}
-    for s in (layout or {}).get("sensors", []):
-        if s.get("modality") in ("lidar", "lidar_semantic"):
-            t = s.get("transform", {})
-            lidar_offsets[s["channel"]] = (
-                t.get("x", 0.0), t.get("y", 0.0), t.get("z", 1.8),
-                m.radians(t.get("yaw", 0.0)))
-
-    # Load ego poses in AD coords for sensor-local conversion
-    ego_ad = {}
-    ego_csv = os.path.join(run_dir, "TRAJ", "ego_trajectory.csv")
-    if os.path.exists(ego_csv):
-        with open(ego_csv) as f:
-            import csv as _csv
-            for row in _csv.DictReader(f):
-                ego_ad[int(row["frame"])] = (
-                    float(row["x"]), float(row["y_left"]), float(row["z"]),
-                    float(row["roll_left"]), float(row["pitch"]), float(row["yaw_left"]))
-
     for lidar_channel in sorted(glob.glob(os.path.join(run_dir, "LIDAR_*"))):
         channel = os.path.basename(lidar_channel)
+        ann_dir = os.path.join(run_dir, channel, "annotations")
+        if not os.path.isdir(ann_dir):
+            continue
         lidar_dir = os.path.join(run_dir, channel, "original")
         if not os.path.isdir(lidar_dir):
             continue
@@ -234,7 +223,6 @@ def _lidar_annotation_viz(run_dir, layout, force_all=False):
         print(f"{channel}/annotations_viz: {len(lidar_files)} frames")
         for lpath in tqdm(lidar_files, desc=f"{channel} lidar_viz", leave=False):
             frame_str = os.path.basename(lpath).replace(".npy", "")
-            frame = int(frame_str)
             ann_path = os.path.join(ann_dir, f"{frame_str}.json")
             if not os.path.exists(ann_path):
                 continue
@@ -248,9 +236,6 @@ def _lidar_annotation_viz(run_dir, layout, force_all=False):
             lx, ly, lz = lx[valid], ly[valid], lz[valid]
             if len(lx) == 0:
                 continue
-
-            # Get ego pose for sensor-local annotation conversion
-            ego = ego_ad.get(frame)
 
             img = np.zeros((size, size), dtype=np.uint8)
             px = ((rng - lx) / (2 * rng) * size).astype(int)
@@ -272,29 +257,8 @@ def _lidar_annotation_viz(run_dir, layout, force_all=False):
                 loc = a["location"]; bb = a["bbox_3d"]
                 if bb["x"] == 0 or bb["y"] == 0:
                     bb = {"x": 4.0, "y": 2.0, "z": 1.5}
-                if ego is not None:
-                    ax_ad, ay_ad, az_ad = loc["x"], loc["y"], loc["z"]
-                    ex_ad, ey_ad, ez_ad, eroll, epitch, eyaw = ego
-                    eyaw_r = m.radians(eyaw)
-                    ce, se = m.cos(eyaw_r), m.sin(eyaw_r)
-                    # annotation → ego frame (AD: X=fwd, Y=left)
-                    dx = ax_ad - ex_ad
-                    dy = ay_ad - ey_ad
-                    fx = dx * ce + dy * se
-                    fy = -(dx * se - dy * ce)
-                    fz = az_ad - ez_ad
-                    # ego frame → sensor frame (subtract offset, rotate by -lidar_yaw)
-                    lx, ly, lz, lyaw = lidar_offsets.get(channel, (0.0, 0.0, 1.8, 0.0))
-                    sx = fx - lx
-                    sy = fy - ly
-                    sz = fz - lz
-                    cly, sly = m.cos(lyaw), m.sin(lyaw)
-                    fx = sx * cly + sy * sly
-                    fy = -(sx * sly - sy * cly)
-                    fyaw = a["rotation"]["yaw"] - eyaw - m.degrees(lyaw)
-                else:
-                    fx, fy = loc["x"], loc["y"]
-                    fyaw = a["rotation"]["yaw"]
+                fx, fy = loc["x"], loc["y"]
+                fyaw = a.get("rotation", {}).get("yaw", 0)
                 yaw = m.radians(fyaw)
                 hx, hy = bb["x"] / 2, bb["y"] / 2
                 cr, sr = m.cos(yaw), m.sin(yaw)

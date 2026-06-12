@@ -74,7 +74,6 @@ class DataCollector:
         print("Vehicle moving, starting collection")
 
         self._output_dir = self._make_output_dir()
-        self._save_global_static_bboxes()
         # Save metadata for post-processing
         import yaml as _yaml
         meta = dict(self._config.get("_sensor_layout", {}))
@@ -136,6 +135,7 @@ class DataCollector:
                         dynamic_ncols=True)
         else:
             pbar = None
+        _static_saved = False
         try:
             while True:
                 from .sensors import set_world_frame
@@ -143,6 +143,9 @@ class DataCollector:
                 set_world_frame(frame)
                 self._world.tick()
 
+                if not _static_saved:
+                    self._save_global_static_bboxes()
+                    _static_saved = True
                 self._save_dynamic_actors(frame)
                 self._record_ego_pose(frame)
 
