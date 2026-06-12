@@ -38,18 +38,17 @@ class DataCollector:
             self._world = client.get_world()
 
         fps = self._config["carla"].get("fps", 20)
-        sync = self._config.get("collection", {}).get("synchronous", True)
 
         settings = self._world.get_settings()
-        settings.synchronous_mode = sync
-        settings.fixed_delta_seconds = 1.0 / fps if sync else 0.0
+        settings.synchronous_mode = True
+        settings.fixed_delta_seconds = 1.0 / fps
         self._world.apply_settings(settings)
 
         self._ensure_static_occ(self._world)
 
         bp_lib = self._world.get_blueprint_library()
         tm = client.get_trafficmanager()
-        tm.set_synchronous_mode(sync)
+        tm.set_synchronous_mode(True)
         tm.set_random_device_seed(0)
 
         weather = self._config["carla"].get("weather", "ClearNoon")
@@ -79,6 +78,7 @@ class DataCollector:
         # Save metadata for post-processing
         import yaml as _yaml
         meta = dict(self._config.get("_sensor_layout", {}))
+        sync = self._config.get("collection", {}).get("synchronous", True)
         meta["_collection"] = {"synchronous": sync, "fps": fps}
         with open(os.path.join(self._output_dir, "sensor_layout.yaml"), "w") as _f:
             _yaml.dump(meta, _f)
@@ -138,16 +138,10 @@ class DataCollector:
             pbar = None
         try:
             while True:
-                if sync:
-                    from .sensors import set_world_frame
-                    frame = self._world.get_snapshot().frame + 1
-                    set_world_frame(frame)
-                    self._world.tick()
-                else:
-                    time.sleep(1.0 / fps)
-                    frame = self._world.get_snapshot().frame
-                    from .sensors import set_world_frame
-                    set_world_frame(frame)
+                from .sensors import set_world_frame
+                frame = self._world.get_snapshot().frame + 1
+                set_world_frame(frame)
+                self._world.tick()
 
                 self._save_dynamic_actors(frame)
                 self._record_ego_pose(frame)
@@ -344,7 +338,6 @@ class DataCollector:
             points[:, 1] = -points[:, 1]
             _sensor_data[channel] = points
             if save_dir is not None:
-                from .sensors import _current_world_frame
                 np.save(os.path.join(save_dir, f"{data.frame:08d}.npy"), points)
 
         sensor.listen(_filter_lidar_cb)

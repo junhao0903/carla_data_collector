@@ -462,19 +462,25 @@ def simulate_async(run_dir):
         rate = s.get("rate_hz")
         if not rate or rate >= sync_fps:
             continue
-        keep_every = max(1, int(round(sync_fps / rate)))
+        step = sync_fps / rate  # e.g. 20/12 ≈ 1.67
         channel = s["channel"]
         for sub in ["original", "depth", "semantic"]:
             d = os.path.join(run_dir, channel, sub)
             if not os.path.isdir(d):
                 continue
             all_files = sorted(glob.glob(os.path.join(d, "*")))
-            kept = [f for i, f in enumerate(all_files) if i % keep_every == 0]
+            kept = []
+            acc = 0.0
+            for f in all_files:
+                acc += 1.0
+                if acc >= step:
+                    kept.append(f)
+                    acc -= step
             for f in all_files:
                 if f not in kept:
                     os.remove(f)
             if all_files:
-                print(f"  {channel}/{sub}: kept {len(kept)}/{len(all_files)} (1/{keep_every})")
+                print(f"  {channel}/{sub}: kept {len(kept)}/{len(all_files)} (rate={rate}Hz)")
 
 
 def post_process(run_dir):
