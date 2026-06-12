@@ -134,7 +134,6 @@ def _camera_annotation_viz(run_dir, layout, force_all=False):
                           glob.glob(os.path.join(orin_dir, "*.npy")))
         if not img_files:
             continue
-        K = load_camera_intrinsics(run_dir, channel)
         print(f"{cam_dir}/annotations_viz: {len(img_files)} files")
         for img_path in tqdm(img_files, desc=f"{channel} annotations_viz", leave=False):
             fname = os.path.basename(img_path)
@@ -151,48 +150,12 @@ def _camera_annotation_viz(run_dir, layout, force_all=False):
                 img = Image.open(img_path).copy()
             draw = ImageDraw.Draw(img)
             for a in anns:
-                loc = a.get("location"); bbox = a.get("bbox_2d")
-                if loc is None or bbox is None:
+                bbox = a.get("bbox_2d")
+                if bbox is None:
                     continue
-                # annotation in camera frame — project to pixel
-                cam_X = loc["x"]; cam_Y = loc["y"]; cam_Z = loc["z"]
-                if cam_X <= 0.1:
-                    continue
-                u = int(K["fx"] * cam_Y / cam_X + K["cx"])
-                v = int(K["fy"] * (-cam_Z) / cam_X + K["cy"])
+                x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
                 color = COLORS.get(a.get("category", "vehicle"), (0, 255, 0))
-                r = 4
-                draw.ellipse([u-r, v-r, u+r, v+r], fill=color)
-            img.save(os.path.join(viz_dir, fname))
-            with open(ann_path) as f:
-                anns = json.load(f)
-            if img_path.endswith(".npy"):
-                arr = np.load(img_path)
-                img = Image.fromarray(arr[:, :, [2, 1, 0]])
-            else:
-                img = Image.open(img_path).copy()
-            draw = ImageDraw.Draw(img)
-            for a in anns:
-                loc = a["location"]; rot = a["rotation"]; sz = a["bbox_3d"]
-                # AD coords → world to camera projection
-                # Simplified: project bbox center
-                ax, ay, az = loc["x"], -loc["y"], loc["z"]
-                dx, dy, dz = ax - ex, ay - ey, az - ez
-                eyaw_r = m.radians(eyaw)
-                cr, sr = m.cos(eyaw_r), m.sin(eyaw_r)
-                cx_ego = dx * cr + dy * sr
-                cy_ego = dx * sr - dy * cr
-                cz_ego = dz
-                cam_X = cx_ego - 1.5
-                cam_Y = cy_ego
-                cam_Z = cz_ego - 1.6
-                if cam_X <= 0.1:
-                    continue
-                u = int(K["fx"] * cam_Y / cam_X + K["cx"])
-                v = int(K["fy"] * (-cam_Z) / cam_X + K["cy"])
-                color = COLORS.get(a.get("category", "vehicle"), (0, 255, 0))
-                r = 4
-                draw.ellipse([u-r, v-r, u+r, v+r], fill=color)
+                draw.rectangle([x1, y1, x2, y2], outline=color, width=1)
             img.save(os.path.join(viz_dir, fname))
 
 

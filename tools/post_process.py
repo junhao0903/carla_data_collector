@@ -491,6 +491,222 @@ def overall_filter_annotations(run_dir):
 # Main
 # ══════════════════════════════════════════════════════════════════════
 
+def annotate_camera(run_dir):
+    """Stable version based on _to_sensor_local (no SE3 rewrite)."""
+
+    layout = _load_sensor_layout(run_dir)
+    if not layout:
+        return
+
+    valid_dir = os.path.join(run_dir, "ANNO", "valid")
+    if not os.path.isdir(valid_dir):
+        return
+
+    # =========================
+    # ego poses
+    # =========================
+    ego_ad = {}
+    ego_csv = os.path.join(run_dir, "TRAJ", "ego_trajectory.csv")
+
+    if os.path.exists(ego_csv):
+        import csv as _csv
+        with open(ego_csv) as f:
+            for row in _csv.DictReader(f):
+                ego_ad[int(row["frame"])] = (
+                    float(row["x"]),
+                    float(row["y_left"]),
+                    float(row["z"]),
+                    float(row["roll_left"]),
+                    float(row["pitch"]),
+                    float(row["yaw_left"]),
+                )
+
+    # =========================
+    # intrinsics
+    # =========================
+    def compute_K(spec):
+        out = spec.get("output", {})
+        w = out.get("width", 1600)
+        h = out.get("height", 900)
+
+        if "fx" in out:
+            return {
+                "fx": out["fx"], "fy": out["fy"],
+                "cx": out["cx"], "cy": out["cy"],
+                "width": w, "height": h
+            }
+
+        hfov = m.radians(out.get("fov", 70))
+        fx = w / (2 * m.tan(hfov / 2))
+        vfov = 2 * m.atan(m.tan(hfov / 2) * h / w)
+        fy = h / (2 * m.tan(vfov / 2))
+
+        return {"fx": fx, "fy": fy, "cx": w / 2, "cy": h / 2,
+                "width": w, "height": h}
+
+    # =========================
+    # bbox corners
+    # =========================
+    def make_corners(bb):
+        dx = max(bb.get("x", 2.0) / 2, 0.5)
+        dy = max(bb.get("y", 2.0) / 2, 0.25)
+        dz = max(bb.get("z", 2.0) / 2, 0.25)
+
+        return np.array([
+            [ dx,  dy,  dz],
+            [ dx,  dy, -dz],
+            [ dx, -dy,  dz],
+            [ dx, -dy, -dz],
+            [-dx,  dy,  dz],
+            [-dx,  dy, -dz],
+            [-dx, -dy,  dz],
+            [-dx, -dy, -dz],
+        ])
+
+    # =========================
+    # projection
+    # =========================
+    def project(K, pts):
+        fx, fy = K["fx"], K["fy"]
+        cx, cy = K["cx"], K["cy"]
+
+        X = pts[:, 0]
+        Y = pts[:, 1]
+        Z = pts[:, 2]
+
+        valid = X > 0.1
+        if valid.sum() == 0:
+            return None
+
+        u = fx * (-Y / X) + cx
+        v = fy * (-Z / X) + cy
+
+        return u, v, valid
+
+    # =========================
+    # main loop
+    # =========================
+    for s in layout.get("sensors", []):
+        if not s.get("enabled", True):
+            continue
+        if s["modality"] != "camera_rgb":
+            continue
+
+        channel = s["channel"]
+        K = compute_K(s)
+        w, h = K["width"], K["height"]
+
+        t = s.get("transform", {})
+
+        cam_offsets = (
+            t.get("x", 1.5),
+            t.get("y", 0.0),
+            t.get("z", 1.6),
+            m.radians(t.get("roll", 0.0)),
+            m.radians(t.get("pitch", 0.0)),
+            m.radians(t.get("yaw", 0.0)),
+        )
+
+        ann_dir = os.path.join(run_dir, channel, "annotations")
+        os.makedirs(ann_dir, exist_ok=True)
+
+        for fname in sorted(os.listdir(valid_dir)):
+            if not fname.endswith(".json"):
+                continue
+
+            frame = int(fname.replace(".json", ""))
+            if frame not in ego_ad:
+                continue
+
+            ego = ego_ad[frame]
+
+            with open(os.path.join(valid_dir, fname)) as f:
+                anns = json.load(f)
+
+            projected = []
+
+            for a in anns:
+
+                # =========================
+                # 1. to sensor frame (ONLY place where transform happens)
+                # =========================
+                sx, sy, sz, sroll, spitch, syaw = _to_sensor_local(
+                    a["location"]["x"],
+                    a["location"]["y"],
+                    a["location"]["z"],
+                    a.get("rotation", {}).get("roll", 0.0),
+                    a.get("rotation", {}).get("pitch", 0.0),
+                    a.get("rotation", {}).get("yaw", 0.0),
+                    ego,
+                    cam_offsets
+                )
+                print("[SENSOR POS]", "sx:", sx, "sy:", sy, "sz:", sz)
+                # debug point (VERY IMPORTANT)
+                # print("sensor xyz:", sx, sy, sz)
+
+                if sx <= 0.1:
+                    continue
+
+                # =========================
+                # 2. bbox corners
+                # =========================
+                corners = make_corners(a.get("bbox_3d", {}))
+
+                # ⚠️ ONLY yaw rotation (consistent with your pipeline)
+                yaw = m.radians(syaw)
+                cr, sr = m.cos(yaw), m.sin(yaw)
+
+                R = np.array([
+                    [cr, -sr, 0],
+                    [sr,  cr, 0],
+                    [0,   0,  1]
+                ])
+
+                corners = (R @ corners.T).T + np.array([sx, sy, sz])
+
+                # =========================
+                # 3. projection
+                # =========================
+                proj = project(K, corners)
+                if proj is None:
+                    continue
+
+                u, v, valid = proj
+                u = u[valid]
+                v = v[valid]
+
+                if len(u) < 2:
+                    continue
+
+                # =========================
+                # 4. bbox
+                # =========================
+                xmin = int(np.clip(u.min(), 0, w - 1))
+                xmax = int(np.clip(u.max(), 0, w - 1))
+                ymin = int(np.clip(v.min(), 0, h - 1))
+                ymax = int(np.clip(v.max(), 0, h - 1))
+
+                if xmax <= xmin or ymax <= ymin:
+                    continue
+
+                entry = dict(a)
+                entry["bbox_2d"] = [xmin, ymin, xmax, ymax]
+
+                entry["location"] = {
+                    "x": float(sx),
+                    "y": float(sy),
+                    "z": float(sz),
+                }
+
+                projected.append(entry)
+
+            out_path = os.path.join(ann_dir, f"{frame:08d}.json")
+            with open(out_path, "w") as f:
+                json.dump(projected, f)
+
+        print(f"[OK] {channel}")
+
+
 def annotate_lidar(run_dir):
     """Project ANNO/valid annotations into each LiDAR sensor frame with FOV filter."""
     layout = _load_sensor_layout(run_dir)
@@ -669,6 +885,7 @@ def post_process(run_dir):
         ("Remap IDs", lambda: remap_static_ids(run_dir)),
         ("Overall Filter", lambda: overall_filter_annotations(run_dir)),
         ("LiDAR Annotate", lambda: annotate_lidar(run_dir)),
+        ("Camera Annotate", lambda: annotate_camera(run_dir)),
     ]
     for name, fn in tqdm(steps, desc="Post-processing", leave=True):
         fn()

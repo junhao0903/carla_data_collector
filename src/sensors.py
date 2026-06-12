@@ -86,10 +86,12 @@ def _compute_intrinsic(spec):
 
 
 def _make_transform(t):
+    """Convert sensor extrinsics from AD coords (X=fwd, Y=left, Z=up, yaw+=left)
+    to CARLA coords (X=fwd, Y=right, Z=up, yaw+=right)."""
     return carla.Transform(
-        carla.Location(x=t.get("x", 0), y=t.get("y", 0), z=t.get("z", 0)),
+        carla.Location(x=t.get("x", 0), y=-t.get("y", 0), z=t.get("z", 0)),
         carla.Rotation(
-            roll=t.get("roll", 0), pitch=t.get("pitch", 0), yaw=t.get("yaw", 0)
+            roll=-t.get("roll", 0), pitch=t.get("pitch", 0), yaw=-t.get("yaw", 0)
         ),
     )
 
@@ -130,10 +132,11 @@ def get_sensor_data():
 
 def _camera_callback(save_dir, channel):
     def cb(image):
-        _sensor_frames[channel] = image.frame
+        frame = image.frame - 1  # camera rendering lags one tick behind physics
+        _sensor_frames[channel] = frame
         array = np.frombuffer(image.raw_data, dtype=np.uint8)
         array = array.reshape((image.height, image.width, 4))
-        np.save(os.path.join(save_dir, f"{image.frame:08d}.npy"), array)
+        np.save(os.path.join(save_dir, f"{frame:08d}.npy"), array)
 
     return cb
 
@@ -170,7 +173,7 @@ def _depth_callback(save_dir):
         else:
             array = array.reshape((h, w))
             depth = array.astype(np.float32)
-        np.save(os.path.join(save_dir, f"{image.frame:08d}.npy"), depth)
+        np.save(os.path.join(save_dir, f"{image.frame - 1:08d}.npy"), depth)
 
     return cb
 
@@ -234,7 +237,7 @@ def _semantic_callback(save_dir):
         else:
             tags = array.reshape((h, w))
         img = Image.fromarray(tags, mode="L")
-        img.save(os.path.join(save_dir, f"{image.frame:08d}.png"))
+        img.save(os.path.join(save_dir, f"{image.frame - 1:08d}.png"))
 
     return cb
 
