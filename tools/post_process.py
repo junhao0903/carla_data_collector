@@ -491,6 +491,93 @@ def overall_filter_annotations(run_dir):
 # Main
 # ══════════════════════════════════════════════════════════════════════
 
+def annotate_lidar(run_dir):
+    """Project ANNO/valid annotations into each LiDAR sensor frame with FOV filter."""
+    layout = _load_sensor_layout(run_dir)
+    if not layout:
+        return
+    valid_dir = os.path.join(run_dir, "ANNO", "valid")
+    if not os.path.isdir(valid_dir):
+        return
+
+    # Load ego poses in AD coords
+    ego_ad = {}
+    ego_csv = os.path.join(run_dir, "TRAJ", "ego_trajectory.csv")
+    if os.path.exists(ego_csv):
+        with open(ego_csv) as f:
+            for row in _csv.DictReader(f):
+                ego_ad[int(row["frame"])] = (
+                    float(row["x"]), float(row["y_left"]), float(row["z"]),
+                    float(row["roll_left"]), float(row["pitch"]), float(row["yaw_left"]))
+
+    for s in layout.get("sensors", []):
+        if not s.get("enabled", True):
+            continue
+        if s["modality"] not in ("lidar", "lidar_semantic"):
+            continue
+        channel = s["channel"]
+        if channel == "LIDAR_FILTER":
+            continue
+        out = s.get("output", {})
+        lidar_range = out.get("range", 100)
+        upper_fov = m.radians(out.get("upper_fov", 10))
+        lower_fov = m.radians(out.get("lower_fov", -30))
+        h_fov = m.radians(out.get("horizontal_fov", 360))
+
+        t = s.get("transform", {})
+        lidar_offsets = (
+            t.get("x", 0.0), t.get("y", 0.0), t.get("z", 1.8),
+            m.radians(t.get("roll", 0.0)), m.radians(t.get("pitch", 0.0)),
+            m.radians(t.get("yaw", 0.0)),
+        )
+
+        ann_dir = os.path.join(run_dir, channel, "annotations")
+        os.makedirs(ann_dir, exist_ok=True)
+        count = 0
+
+        for fname in sorted(os.listdir(valid_dir)):
+            frame = int(fname.replace(".json", ""))
+            ego = ego_ad.get(frame)
+            if ego is None:
+                continue
+
+            with open(os.path.join(valid_dir, fname)) as f:
+                anns = json.load(f)
+
+            projected = []
+            for a in anns:
+                rot = a.get("rotation", {})
+                sx, sy, sz, sroll, spitch, syaw = _to_sensor_local(
+                    a["location"]["x"], a["location"]["y"], a["location"]["z"],
+                    rot.get("roll", 0), rot.get("pitch", 0), rot.get("yaw", 0),
+                    ego, lidar_offsets)
+
+                # Check if annotation center is within FOV
+                d = m.sqrt(sx * sx + sy * sy + sz * sz)
+                if d > lidar_range:
+                    continue
+                if d > 0.01:
+                    elev = m.asin(sz / d)
+                    if elev < lower_fov or elev > upper_fov:
+                        continue
+                if h_fov < m.radians(360) and d > 0.01:
+                    azim = m.atan2(sy, sx)
+                    if abs(azim) > h_fov / 2:
+                        continue
+
+                entry = dict(a)
+                entry["location"] = {"x": sx, "y": sy, "z": sz}
+                entry["rotation"] = {"roll": sroll, "pitch": spitch, "yaw": syaw}
+                projected.append(entry)
+
+            out_path = os.path.join(ann_dir, f"{frame:08d}.json")
+            with open(out_path, "w") as f:
+                json.dump(projected, f)
+            count += 1
+
+        print(f"  {channel}/annotations: {count} frames")
+
+
 def simulate_async(run_dir):
     """Drop frames per sensor rate_hz to simulate async mode from sync data."""
     layout = _load_sensor_layout(run_dir)
@@ -581,6 +668,7 @@ def post_process(run_dir):
         ("Align Frames", lambda: align_frames(run_dir)),
         ("Remap IDs", lambda: remap_static_ids(run_dir)),
         ("Overall Filter", lambda: overall_filter_annotations(run_dir)),
+        ("LiDAR Annotate", lambda: annotate_lidar(run_dir)),
     ]
     for name, fn in tqdm(steps, desc="Post-processing", leave=True):
         fn()
