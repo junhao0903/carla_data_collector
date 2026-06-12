@@ -103,7 +103,6 @@ def _attach_camera(world, vehicle, bp_lib, spec, transform, save_dir):
     bp.set_attribute("image_size_y", str(out.get("height", 720)))
     bp.set_attribute("fov", str(out.get("fov", 90)))
     rate = spec.get("rate_hz", 20)
-    bp.set_attribute("sensor_tick", str(1.0 / rate))
 
     sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
     sensor.listen(_camera_callback(save_dir, spec["channel"]))
@@ -134,7 +133,7 @@ def _camera_callback(save_dir, channel):
         _sensor_frames[channel] = image.frame
         array = np.frombuffer(image.raw_data, dtype=np.uint8)
         array = array.reshape((image.height, image.width, 4))
-        np.save(os.path.join(save_dir, f"{_current_world_frame:08d}.npy"), array)
+        np.save(os.path.join(save_dir, f"{image.frame:08d}.npy"), array)
 
     return cb
 
@@ -148,7 +147,6 @@ def _attach_depth_camera(world, vehicle, bp_lib, spec, transform, save_dir):
     bp.set_attribute("image_size_y", str(out.get("height", 720)))
     bp.set_attribute("fov", str(out.get("fov", 90)))
     rate = spec.get("rate_hz", 20)
-    bp.set_attribute("sensor_tick", str(1.0 / rate))
 
     sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
     sensor.listen(_depth_callback(save_dir))
@@ -172,7 +170,7 @@ def _depth_callback(save_dir):
         else:
             array = array.reshape((h, w))
             depth = array.astype(np.float32)
-        np.save(os.path.join(save_dir, f"{_current_world_frame:08d}.npy"), depth)
+        np.save(os.path.join(save_dir, f"{image.frame:08d}.npy"), depth)
 
     return cb
 
@@ -186,7 +184,6 @@ def _attach_semantic_camera(world, vehicle, bp_lib, spec, transform, save_dir):
     bp.set_attribute("image_size_y", str(out.get("height", 720)))
     bp.set_attribute("fov", str(out.get("fov", 90)))
     rate = spec.get("rate_hz", 20)
-    bp.set_attribute("sensor_tick", str(1.0 / rate))
 
     sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
     sensor.listen(_semantic_callback(save_dir))
@@ -237,7 +234,7 @@ def _semantic_callback(save_dir):
         else:
             tags = array.reshape((h, w))
         img = Image.fromarray(tags, mode="L")
-        img.save(os.path.join(save_dir, f"{_current_world_frame:08d}.png"))
+        img.save(os.path.join(save_dir, f"{image.frame:08d}.png"))
 
     return cb
 
@@ -255,8 +252,7 @@ def _attach_lidar(world, vehicle, bp_lib, spec, transform, save_dir):
     bp.set_attribute(
         "rotation_frequency", str(out.get("rotation_frequency", 10))
     )
-    rate = spec.get("rate_hz", 20)
-    bp.set_attribute("sensor_tick", str(1.0 / rate))
+    # LiDAR rate controlled by rotation_frequency, not sensor_tick
 
     sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
     sensor.listen(_lidar_callback(save_dir, spec["channel"]))
@@ -270,7 +266,7 @@ def _lidar_callback(save_dir, channel):
         points = points.reshape((-1, 4))
         points[:, 1] = -points[:, 1]  # Y: right → left (standard)
         _sensor_data[channel] = points
-        np.save(os.path.join(save_dir, f"{_current_world_frame:08d}.npy"), points)
+        np.save(os.path.join(save_dir, f"{data.frame:08d}.npy"), points)
 
     return cb
 
@@ -285,31 +281,21 @@ def _attach_semantic_lidar(world, vehicle, bp_lib, spec, transform, save_dir):
     bp.set_attribute(
         "rotation_frequency", str(out.get("rotation_frequency", 10))
     )
-    rate = spec.get("rate_hz", 20)
-    bp.set_attribute("sensor_tick", str(1.0 / rate))
+    # LiDAR rate controlled by rotation_frequency, not sensor_tick
 
     sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
-    sensor.listen(_semantic_lidar_callback(save_dir, spec["channel"], sensor))
+    sensor.listen(_semantic_lidar_callback(save_dir, spec["channel"]))
     return sensor
 
 
-def _semantic_lidar_callback(save_dir, channel, sensor):
+def _semantic_lidar_callback(save_dir, channel):
     def cb(data):
         _sensor_frames[channel] = data.frame
         points = np.frombuffer(data.raw_data, dtype=np.float32).copy()
         points = points.reshape((-1, 6))  # x, y, z, cos_angle, obj_tag, obj_idx
-        # Convert from CARLA world to sensor-local frame (X=fwd, Y=left, Z=up)
-        t = sensor.get_transform()
-        sx, sy, sz = t.location.x, t.location.y, t.location.z
-        yaw = math.radians(t.rotation.yaw)
-        cy, syaw = math.cos(yaw), math.sin(yaw)
-        dx = points[:, 0] - sx
-        dy = points[:, 1] - sy
-        points[:, 0] = dx * cy + dy * syaw
-        points[:, 1] = -(dx * syaw - dy * cy)
-        points[:, 2] = points[:, 2] - sz
+        points[:, 1] = -points[:, 1]  # left-hand Y=right → right-hand Y=left
         _sensor_data[channel] = points
-        np.save(os.path.join(save_dir, f"{_current_world_frame:08d}.npy"), points)
+        np.save(os.path.join(save_dir, f"{data.frame:08d}.npy"), points)
 
     return cb
 
@@ -319,7 +305,6 @@ def _semantic_lidar_callback(save_dir, channel, sensor):
 def _attach_gnss(world, vehicle, bp_lib, spec, transform, save_dir):
     bp = bp_lib.find(spec["blueprint"])
     rate = spec.get("rate_hz", 20)
-    bp.set_attribute("sensor_tick", str(1.0 / rate))
     sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
     sensor.listen(_gnss_callback(save_dir))
     return sensor
@@ -333,7 +318,7 @@ def _gnss_callback(save_dir):
 
     def cb(data):
         writer.writerow(
-            [_current_world_frame, data.timestamp, data.latitude, data.longitude, data.altitude]
+            [data.frame, data.timestamp, data.latitude, data.longitude, data.altitude]
         )
         f.flush()
 
@@ -345,7 +330,6 @@ def _gnss_callback(save_dir):
 def _attach_imu(world, vehicle, bp_lib, spec, transform, save_dir):
     bp = bp_lib.find(spec["blueprint"])
     rate = spec.get("rate_hz", 20)
-    bp.set_attribute("sensor_tick", str(1.0 / rate))
     sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
     sensor.listen(_imu_callback(save_dir))
     return sensor

@@ -1,32 +1,24 @@
-# CARLA 仿真数据采集器 — 主配置
-# 用法: python run.py [<config_name>.yaml]
-
 carla:
-  host: 127.0.0.1          # CARLA 服务地址
-  port: 2000               # CARLA RPC 端口
-  timeout_seconds: 60.0    # 客户端超时 (nuscenes 6相机+LiDAR 需较大值)
-  map: Town10HD             # 要加载的地图 (Town01–Town07, Town10HD)
-  weather: ClearNoon       # 天气预设 (ClearNoon, CloudyNoon, HardRainNoon, WetSunset...)
-  fps: 20                  # 同步模式下的仿真帧率
-
-vehicle:
-  model: model3            # 自车车型 (对应 blueprint: vehicle.tesla.model3)
-
-traffic:
-  vehicle_count: 10
-  min_vehicle_count: 1     # 最少需成功生成的 NPC 数 (不够则报错)
-  npc_seed: 42             # NPC 随机种子
-
+  fps: 20
+  host: 127.0.0.1
+  map: Town10HD
+  port: 2000
+  timeout_seconds: 60.0
+  weather: ClearNoon
 collection:
-  output_dir: output       # 数据输出根目录
-  duration_seconds: 10      # 采集时长 (秒), 0 = 不限时, Ctrl+C 退出
-  synchronous: true        # 同步模式 (建议开启, 保证数据帧率稳定)
-  warmup_ticks: 10         # 预热 ticks (传感器稳定期, 不记录数据)
-  motion_speed_kmh: 5       # 车速达到此值 (km/h) 开始采集
-  motion_consecutive_ticks: 1   # 达到速度后立即开始采集
-  motion_timeout_ticks: 500     # 等待加速的最大 tick 数
-
+  duration_seconds: 10
+  motion_consecutive_ticks: 1
+  motion_speed_kmh: 5
+  motion_timeout_ticks: 500
+  output_dir: output
+  synchronous: true
+  warmup_ticks: 10
 ground_truth:
-  annotation_filter: default.yaml    # 过滤 LiDAR 配置 (config/filter/)
-
-sensor_layout: default.yaml  # 传感器布局文件 (自动查找 config/sensor/ 目录)
+  annotation_filter: default.yaml
+sensor_layout: default.yaml
+traffic:
+  min_vehicle_count: 1
+  npc_seed: 42
+  vehicle_count: 10
+vehicle:
+  model: model3

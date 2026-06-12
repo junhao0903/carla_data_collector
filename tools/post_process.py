@@ -25,8 +25,8 @@ def _load_ego_trajectory(run_dir):
         reader = _csv.DictReader(f)
         for row in reader:
             ego[int(row["frame"])] = (
-                float(row["x"]), -float(row["y"]), float(row["z"]),
-                -float(row["roll"]), float(row["pitch"]), -float(row["yaw"]))
+                float(row["x"]), float(row["y_left"]), float(row["z"]),
+                float(row["roll_left"]), float(row["pitch"]), float(row["yaw_left"]))
     return ego
 
 
@@ -160,8 +160,8 @@ def generate_gt_occ(run_dir, ann_dir, ego_csv, meta_path):
         reader = _csv.DictReader(f)
         for row in reader:
             ego_frames[int(row["frame"])] = (
-                float(row["x"]), -float(row["y"]), float(row["z"]),
-                -float(row["roll"]), float(row["pitch"]), -float(row["yaw"]))
+                float(row["x"]), float(row["y_left"]), float(row["z"]),
+                float(row["roll_left"]), float(row["pitch"]), float(row["yaw_left"]))
 
     ann_files = sorted(glob.glob(os.path.join(ann_dir, "*.json")))
     anns_by_frame = {}
@@ -325,9 +325,53 @@ def overall_filter_annotations(run_dir):
     out_dir = os.path.join(run_dir, "LIDAR_FILTER", "annotations")
     os.makedirs(out_dir, exist_ok=True)
 
+    # Load ego poses in AD coords (X=fwd, Y=left) and LiDAR offset
+    ego_ad = {}
+    ego_csv = os.path.join(run_dir, "TRAJ", "ego_trajectory.csv")
+    if os.path.exists(ego_csv):
+        with open(ego_csv) as f:
+            for row in _csv.DictReader(f):
+                ego_ad[int(row["frame"])] = (
+                    float(row["x"]), float(row["y_left"]), float(row["z"]),
+                    float(row["roll_left"]), float(row["pitch"]), float(row["yaw_left"]))
+    lidar_tf = filter_cfg.get("transform", {})
+    lx_off = lidar_tf.get("x", 0.0)
+    ly_off = lidar_tf.get("y", 0.0)
+    lz_off = lidar_tf.get("z", 1.8)
+    lyaw_off = m.radians(lidar_tf.get("yaw", 0.0))
+
+    # Load static bboxes (global AD coords)
+    static_bboxes = []
+    static_path = os.path.join(run_dir, "ANNO", "static_bboxes.json")
+    if os.path.exists(static_path):
+        with open(static_path) as f:
+            static_bboxes = json.load(f)
+
     ann_files = sorted(glob.glob(os.path.join(ann_dir, "*.json")))
     if not ann_files:
         return
+
+    def _to_sensor_local(ax_ad, ay_ad, az_ad, ayaw_ad, ego):
+        ex_ad, ey_ad, ez_ad, _, _, eyaw = ego
+        eyaw_r = m.radians(eyaw); ce, se = m.cos(eyaw_r), m.sin(eyaw_r)
+        fx = (ax_ad - ex_ad) * ce + (ay_ad - ey_ad) * se
+        fy = -((ax_ad - ex_ad) * se - (ay_ad - ey_ad) * ce)
+        fz = az_ad - ez_ad
+        sx = fx - lx_off; sy = fy - ly_off; sz = fz - lz_off
+        cly, sly = m.cos(lyaw_off), m.sin(lyaw_off)
+        return (sx * cly + sy * sly, -(sx * sly - sy * cly), sz,
+                ayaw_ad - eyaw - m.degrees(lyaw_off))
+
+    def _count_points(pts, sx, sy, sz, ayaw_s, hx, hy, hz):
+        dx = pts[:, 0] - sx; dy = pts[:, 1] - sy; dz = pts[:, 2] - sz
+        yaw = m.radians(ayaw_s); cr, sr = m.cos(yaw), m.sin(yaw)
+        lx = dx * cr + dy * sr; ly = -dx * sr + dy * cr
+        return int(((np.abs(lx) <= hx) & (np.abs(ly) <= hy) & (np.abs(dz) <= hz)).sum())
+
+    def _category(type_id):
+        if str(type_id).startswith("vehicle."): return "vehicle"
+        if str(type_id).startswith("walker.pedestrian."): return "pedestrian"
+        return "vehicle"
 
     occ_filtered_count = 0
     recent_ids = []
@@ -341,39 +385,40 @@ def overall_filter_annotations(run_dir):
         with open(ann_path) as f:
             anns = json.load(f)
 
+        ego = ego_ad.get(frame)
         temporal_keep = set()
         for s in recent_ids:
             temporal_keep |= s
 
         filtered = []
         kept_this_frame = set()
-        for a in anns:
-            loc = a["location"]; bb = a.get("bbox_3d", {})
-            rot = a.get("rotation", {})
-            hx = max(bb.get("x", 2.0) / 2, 1.0)
-            hy = max(bb.get("y", 2.0) / 2, 0.5)
-            hz = max(bb.get("z", 2.0) / 2, 0.5)
-            dx = pts[:, 0] - loc["x"]
-            dy = pts[:, 1] - loc["y"]
-            dz = pts[:, 2] + 1.8 - loc["z"]
-            yaw = m.radians(rot.get("yaw", 0))
-            cr, sr = m.cos(yaw), m.sin(yaw)
-            lx = dx * cr + dy * sr
-            ly = -dx * sr + dy * cr
-            pt_count = int(((np.abs(lx) <= hx) & (np.abs(ly) <= hy) & (np.abs(dz) <= hz)).sum())
-            aid = a.get("actor_id", 0)
-            if pt_count < min_pts and aid not in temporal_keep:
-                occ_filtered_count += 1
-                continue
-            tid = str(a.get("type_id", ""))
-            if tid.startswith("vehicle."):
-                a["category"] = "vehicle"
-            elif tid.startswith("walker.pedestrian."):
-                a["category"] = "pedestrian"
-            else:
-                a["category"] = "vehicle"
-            filtered.append(a)
-            kept_this_frame.add(aid)
+
+        def _filter_actors(actor_list, apply_temporal=True):
+            nonlocal occ_filtered_count
+            for a in actor_list:
+                bb = a.get("bbox_3d", {})
+                hx = max(bb.get("x", 2.0) / 2, 1.0)
+                hy = max(bb.get("y", 2.0) / 2, 0.5)
+                hz = max(bb.get("z", 2.0) / 2, 0.5)
+                if ego is not None:
+                    sx, sy, sz, ayaw_s = _to_sensor_local(
+                        a["location"]["x"], a["location"]["y"], a["location"]["z"],
+                        a.get("rotation", {}).get("yaw", 0), ego)
+                else:
+                    sx, sy, sz = a["location"]["x"], a["location"]["y"], a["location"]["z"]
+                    ayaw_s = a.get("rotation", {}).get("yaw", 0)
+                n = _count_points(pts, sx, sy, sz, ayaw_s, hx, hy, hz)
+                aid = a.get("actor_id", 0)
+                if n < min_pts and (not apply_temporal or aid not in temporal_keep):
+                    occ_filtered_count += 1
+                    continue
+                a["category"] = _category(a.get("type_id", ""))
+                filtered.append(a)
+                kept_this_frame.add(aid)
+
+        _filter_actors(anns)
+        if ego is not None:
+            _filter_actors(static_bboxes, apply_temporal=False)
 
         out_path = os.path.join(out_dir, f"{frame:08d}.json")
         with open(out_path, "w") as f:
@@ -401,6 +446,37 @@ def overall_filter_annotations(run_dir):
 # Main
 # ══════════════════════════════════════════════════════════════════════
 
+def simulate_async(run_dir):
+    """Drop frames per sensor rate_hz to simulate async mode from sync data."""
+    layout = _load_sensor_layout(run_dir)
+    if not layout:
+        return
+    coll_cfg = layout.get("_collection", {})
+    if coll_cfg.get("synchronous", True):
+        return
+    sync_fps = coll_cfg.get("fps", 20)
+
+    for s in layout.get("sensors", []):
+        if not s.get("enabled", True):
+            continue
+        rate = s.get("rate_hz")
+        if not rate or rate >= sync_fps:
+            continue
+        keep_every = max(1, int(round(sync_fps / rate)))
+        channel = s["channel"]
+        for sub in ["original", "depth", "semantic"]:
+            d = os.path.join(run_dir, channel, sub)
+            if not os.path.isdir(d):
+                continue
+            all_files = sorted(glob.glob(os.path.join(d, "*")))
+            kept = [f for i, f in enumerate(all_files) if i % keep_every == 0]
+            for f in all_files:
+                if f not in kept:
+                    os.remove(f)
+            if all_files:
+                print(f"  {channel}/{sub}: kept {len(kept)}/{len(all_files)} (1/{keep_every})")
+
+
 def post_process(run_dir):
     layout = _load_sensor_layout(run_dir)
     steps = [
@@ -408,6 +484,7 @@ def post_process(run_dir):
         ("Depth", lambda: convert_depth(run_dir)),
         ("Original", lambda: convert_orin(run_dir, 95)),
         ("OCC", lambda: generate_occ(run_dir, layout)),
+        ("Async Sim", lambda: simulate_async(run_dir)),
         ("Align Frames", lambda: align_frames(run_dir)),
         ("Remap IDs", lambda: remap_static_ids(run_dir)),
         ("Overall Filter", lambda: overall_filter_annotations(run_dir)),
