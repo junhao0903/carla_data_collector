@@ -442,26 +442,32 @@ def overall_filter_annotations(run_dir):
 
         _filter_actors(anns)
         if ego is not None:
-            _filter_actors(static_bboxes, apply_temporal=False)
+            _filter_actors(static_bboxes, apply_temporal=True)
 
         # Save global AD coords to ANNO/valid/
         valid_path = os.path.join(valid_dir, f"{frame:08d}.json")
         with open(valid_path, "w") as f:
             json.dump(filtered, f)
 
-        # Convert to sensor-local AD for LIDAR_FILTER/annotations/
+        # Convert to sensor-local AD for LIDAR_FILTER/annotations/ (copy, don't mutate)
+        out_path = os.path.join(out_dir, f"{frame:08d}.json")
         if ego is not None:
+            sensor_local = []
             for a in filtered:
                 rot = a.get("rotation", {})
                 sx, sy, sz, sroll, spitch, syaw = _to_sensor_local(
                     a["location"]["x"], a["location"]["y"], a["location"]["z"],
                     rot.get("roll", 0), rot.get("pitch", 0), rot.get("yaw", 0),
                     ego, lidar_offsets)
-                a["location"] = {"x": sx, "y": sy, "z": sz}
-                a["rotation"] = {"roll": sroll, "pitch": spitch, "yaw": syaw}
-        out_path = os.path.join(out_dir, f"{frame:08d}.json")
-        with open(out_path, "w") as f:
-            json.dump(filtered, f)
+                entry = dict(a)
+                entry["location"] = {"x": sx, "y": sy, "z": sz}
+                entry["rotation"] = {"roll": sroll, "pitch": spitch, "yaw": syaw}
+                sensor_local.append(entry)
+            with open(out_path, "w") as f:
+                json.dump(sensor_local, f)
+        else:
+            with open(out_path, "w") as f:
+                json.dump(filtered, f)
         recent_ids.append(kept_this_frame)
         if len(recent_ids) > temporal_frames:
             recent_ids.pop(0)
@@ -552,7 +558,7 @@ def dedup_static_bboxes(run_dir):
     before = len(static_bboxes)
     static_bboxes = [sb for sb in static_bboxes
                      if not any(((sb["location"]["x"] - a["location"]["x"])**2 +
-                                 (sb["location"]["y"] - a["location"]["y"])**2)**0.5 < 0.5
+                                 (sb["location"]["y"] - a["location"]["y"])**2)**0.5 < 2.0
                                 for a in dyn_actors)
                      and not (ego_pos is not None and
                               ((sb["location"]["x"] - ego_pos[0])**2 +
