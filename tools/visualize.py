@@ -369,7 +369,7 @@ def _load_ego_poses(run_dir):
             parts = line.strip().split(",")
             try:
                 p = {"x": float(parts[1]), "y": -float(parts[2]), "z": float(parts[3]),
-                     "roll": -float(parts[4]), "pitch": float(parts[5]), "yaw": -float(parts[6])}
+                     "roll": float(parts[4]), "pitch": -float(parts[5]), "yaw": -float(parts[6])}
                 poses[int(parts[0])] = p
             except (ValueError, IndexError):
                 pass

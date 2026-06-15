@@ -30,9 +30,9 @@ def load_ego_poses(ego_csv):
         for row in csv.DictReader(f):
             frame = int(row["frame"])
             d = (float(row["x"]), -float(row["y_left"]), float(row["z"]),
-                 -float(row["roll_left"]), float(row["pitch"]), -float(row["yaw_left"]))
+                 float(row["roll_left"]), -float(row["pitch"]), -float(row["yaw_left"]))
             if "cam_x" in row:
-                d += (-float(row["cam_roll_left"]), float(row["cam_pitch"]),
+                d += (float(row["cam_roll_left"]), -float(row["cam_pitch"]),
                       -float(row["cam_yaw_left"]))
             poses[frame] = d
     return poses

@@ -86,12 +86,19 @@ def _compute_intrinsic(spec):
 
 
 def _make_transform(t):
-    """Convert sensor extrinsics from AD coords (X=fwd, Y=left, Z=up, yaw+=left)
-    to CARLA coords (X=fwd, Y=right, Z=up, yaw+=right)."""
+    """Convert sensor extrinsics from AD coords (X=fwd, Y=left, Z=up)
+    to CARLA coords (X=fwd, Y=right, Z=up)."""
+
     return carla.Transform(
-        carla.Location(x=t.get("x", 0), y=-t.get("y", 0), z=t.get("z", 0)),
+        carla.Location(
+            x=t.get("x", 0),
+            y=-t.get("y", 0),
+            z=t.get("z", 0),
+        ),
         carla.Rotation(
-            roll=-t.get("roll", 0), pitch=t.get("pitch", 0), yaw=-t.get("yaw", 0)
+            roll=t.get("roll", 0),        # ✅ FIX: no sign flip
+            pitch=-t.get("pitch", 0),
+            yaw=-t.get("yaw", 0),
         ),
     )
 

@@ -7,6 +7,7 @@ import sys, os, json, math as m, glob, csv as _csv
 import numpy as np
 from tqdm import tqdm
 from PIL import Image
+from scipy.spatial.transform import Rotation
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -184,15 +185,15 @@ def generate_gt_occ(run_dir, ann_dir, ego_csv, meta_path):
             desc="GT OCC", leave=True):
         anns = anns_by_frame[frame]
         ego_tf = carla.Transform(
-            carla.Location(x=ex, y=ey, z=ez),
-            carla.Rotation(roll=eroll, pitch=epitch, yaw=eyaw))
+            carla.Location(x=ex, y=-ey, z=ez),
+            carla.Rotation(roll=eroll, pitch=-epitch, yaw=-eyaw))
         dynamic_list = []
         for a in anns:
             loc = a["location"]; rot = a["rotation"]; sz = a["bbox_3d"]
             # AD coords (Y=left) → CARLA world (Y=right)
             actor_tf = carla.Transform(
                 carla.Location(x=loc["x"], y=-loc["y"], z=loc["z"]),
-                carla.Rotation(roll=-rot["roll"], pitch=rot["pitch"], yaw=-rot["yaw"]))
+                carla.Rotation(roll=rot["roll"], pitch=-rot["pitch"], yaw=-rot["yaw"]))
             actor_ext = carla.Vector3D(x=sz["x"] / 2, y=sz["y"] / 2, z=sz["z"] / 2)
             dynamic_list.append((actor_tf, actor_ext, a.get("type_id", "vehicle.car")))
         occ = build_frame_occ(static_occ, static_pc_range, ego_tf, dynamic_list,
@@ -306,28 +307,110 @@ def align_frames(run_dir):
             print(f"  CSV trimmed: {os.path.relpath(csv_path, run_dir)} ({len(lines) - len(kept)} rows)")
 
 
-def _to_sensor_local(ax_ad, ay_ad, az_ad, aroll_ad, apitch_ad, ayaw_ad, ego, lidar_offsets):
-    """Convert global AD annotation to sensor-local (X=fwd, Y=left, Z=up)."""
-    ex_ad, ey_ad, ez_ad, eroll, epitch, eyaw = ego
-    lx_off, ly_off, lz_off, lroll_off, lpitch_off, lyaw_off = lidar_offsets
-    eyaw_r = m.radians(eyaw); ce, se = m.cos(eyaw_r), m.sin(eyaw_r)
-    ep_r = m.radians(epitch); cp, sp = m.cos(ep_r), m.sin(ep_r)
-    er_r = m.radians(eroll); cr, sr = m.cos(er_r), m.sin(er_r)
-    dx = ax_ad - ex_ad; dy = ay_ad - ey_ad; dz = az_ad - ez_ad
-    x1 = dx * ce + dy * se; y1 = -dx * se + dy * ce; z1 = dz
-    x2 = x1 * cp - z1 * sp; y2 = y1; z2 = x1 * sp + z1 * cp
-    fx = x2; fy = y2 * cr + z2 * sr; fz = -y2 * sr + z2 * cr
-    sx = fx - lx_off; sy = fy - ly_off; sz = fz - lz_off
-    cly, sly = m.cos(lyaw_off), m.sin(lyaw_off)
-    clp, slp = m.cos(lpitch_off), m.sin(lpitch_off)
-    clr, slr = m.cos(lroll_off), m.sin(lroll_off)
-    xs1 = sx * cly + sy * sly; ys1 = -sx * sly + sy * cly; zs1 = sz
-    xs2 = xs1 * clp - zs1 * slp; ys2 = ys1; zs2 = xs1 * slp + zs1 * clp
-    xs3 = xs2; ys3 = ys2 * clr + zs2 * slr; zs3 = -ys2 * slr + zs2 * clr
-    return (xs3, ys3, zs3,
-            aroll_ad - eroll - m.degrees(lroll_off),
-            apitch_ad - epitch - m.degrees(lpitch_off),
-            ayaw_ad - eyaw - m.degrees(lyaw_off))
+def _to_sensor_local(
+    ax_ad, ay_ad, az_ad,
+    aroll_ad, apitch_ad, ayaw_ad,
+    ego,
+    sensor_offsets
+):
+    """
+    World(AD) -> Sensor
+
+    return:
+        sx, sy, sz,
+        sroll, spitch, syaw
+    """
+
+    ex, ey, ez, eroll, epitch, eyaw = ego
+
+    sx_off, sy_off, sz_off, \
+    sroll_off, spitch_off, syaw_off = sensor_offsets
+
+    # --------------------------------------------------
+    # world -> ego
+    # --------------------------------------------------
+    R_world_ego = Rotation.from_euler(
+        'xyz',
+        [eroll, epitch, eyaw],
+        degrees=True
+    ).as_matrix()
+
+    t_world_ego = np.array([ex, ey, ez])
+
+    # --------------------------------------------------
+    # ego -> sensor
+    # --------------------------------------------------
+    R_ego_sensor = Rotation.from_euler(
+        'xyz',
+        [
+            np.degrees(sroll_off),
+            np.degrees(spitch_off),
+            np.degrees(syaw_off)
+        ],
+        degrees=True
+    ).as_matrix()
+
+    t_ego_sensor = np.array([
+        sx_off,
+        sy_off,
+        sz_off
+    ])
+
+    # --------------------------------------------------
+    # world -> sensor
+    # --------------------------------------------------
+    R_world_sensor = R_world_ego @ R_ego_sensor
+
+    t_world_sensor = (
+        t_world_ego +
+        R_world_ego @ t_ego_sensor
+    )
+
+    # --------------------------------------------------
+    # object position
+    # --------------------------------------------------
+    p_world = np.array([
+        ax_ad,
+        ay_ad,
+        az_ad
+    ])
+
+    p_sensor = (
+        R_world_sensor.T
+        @
+        (p_world - t_world_sensor)
+    )
+
+    # --------------------------------------------------
+    # object orientation
+    # --------------------------------------------------
+    R_world_obj = Rotation.from_euler(
+        'xyz',
+        [aroll_ad, apitch_ad, ayaw_ad],
+        degrees=True
+    ).as_matrix()
+
+    R_sensor_obj = (
+        R_world_sensor.T
+        @
+        R_world_obj
+    )
+
+    sroll, spitch, syaw = Rotation.from_matrix(
+        R_sensor_obj
+    ).as_euler(
+        'xyz',
+        degrees=True
+    )
+
+    return (
+        float(p_sensor[0]),
+        float(p_sensor[1]),
+        float(p_sensor[2]),
+        float(sroll),
+        float(spitch),
+        float(syaw)
+    )
 
 
 def _count_points(pts, sx, sy, sz, ayaw_s, hx, hy, hz):
@@ -492,7 +575,6 @@ def overall_filter_annotations(run_dir):
 # ══════════════════════════════════════════════════════════════════════
 
 def annotate_camera(run_dir):
-    """Stable version based on _to_sensor_local (no SE3 rewrite)."""
 
     layout = _load_sensor_layout(run_dir)
     if not layout:
@@ -652,15 +734,11 @@ def annotate_camera(run_dir):
                 # =========================
                 corners = make_corners(a.get("bbox_3d", {}))
 
-                # ⚠️ ONLY yaw rotation (consistent with your pipeline)
-                yaw = m.radians(syaw)
-                cr, sr = m.cos(yaw), m.sin(yaw)
-
-                R = np.array([
-                    [cr, -sr, 0],
-                    [sr,  cr, 0],
-                    [0,   0,  1]
-                ])
+                R = Rotation.from_euler(
+                    'xyz',
+                    [sroll, spitch, syaw],
+                    degrees=True
+                ).as_matrix()
 
                 corners = (R @ corners.T).T + np.array([sx, sy, sz])
 

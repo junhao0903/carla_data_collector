@@ -167,7 +167,7 @@ class DataCollector:
     def _save_dynamic_actors(self, frame):
         """Save all dynamic actors in autonomous driving coords (X=fwd,Y=left,Z=up).
 
-        Converts from CARLA world (Y=right) by negating Y, roll, yaw.
+        Converts from CARLA world (Y=right) by negating Y, pitch, yaw.
         """
         ann_dir = os.path.join(self._output_dir, "ANNO", "dynamic_actors")
         os.makedirs(ann_dir, exist_ok=True)
@@ -208,8 +208,8 @@ class DataCollector:
                         "z": float(t.location.z + bz),
                     },
                     "rotation": {
-                        "roll": -float(t.rotation.roll),
-                        "pitch": float(t.rotation.pitch),
+                        "roll": float(t.rotation.roll),
+                        "pitch": -float(t.rotation.pitch),
                         "yaw": -float(t.rotation.yaw),
                     },
                     "velocity": {
@@ -253,8 +253,8 @@ class DataCollector:
                         "z": bb.location.z,
                     },
                     "rotation": {
-                        "roll": -bb.rotation.roll,
-                        "pitch": bb.rotation.pitch,
+                        "roll": bb.rotation.roll,
+                        "pitch": -bb.rotation.pitch,
                         "yaw": -bb.rotation.yaw,
                     },
                     "bbox_3d": {
@@ -408,13 +408,13 @@ class DataCollector:
         ego_t = self._vehicle.get_transform()
         row = [frame,
                ego_t.location.x, -ego_t.location.y, ego_t.location.z,
-               -ego_t.rotation.roll, ego_t.rotation.pitch, -ego_t.rotation.yaw]
+               ego_t.rotation.roll, -ego_t.rotation.pitch, -ego_t.rotation.yaw]
         for spec in self._camera_specs:
             sensor = self._rgb_sensors.get(spec["channel"])
             if sensor and sensor.is_alive:
                 ct = sensor.get_transform()
                 row += [ct.location.x, -ct.location.y, ct.location.z,
-                        -ct.rotation.roll, ct.rotation.pitch, -ct.rotation.yaw]
+                        ct.rotation.roll, -ct.rotation.pitch, -ct.rotation.yaw]
         self._ego_writer.writerow(row)
 
     def _run_post_processing(self):
