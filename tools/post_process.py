@@ -520,12 +520,24 @@ def overall_filter_annotations(run_dir):
                 volume = (2 * hx) * (2 * hy) * (2 * hz)
                 threshold = max(min_pts_floor, int(volume * pts_per_m3))
                 aid = a.get("actor_id", 0)
-                if n < threshold and (not apply_temporal or aid not in temporal_keep):
-                    occ_filtered_count += 1
-                    continue
+
+                passed_by_points = (n >= threshold)
+
+                # 点数不足
+                if not passed_by_points:
+                    # 不在时间窗口内，直接过滤
+                    if (not apply_temporal) or (aid not in temporal_keep):
+                        occ_filtered_count += 1
+                        continue
+
+                # 保留
                 a["category"] = _category(a.get("type_id", ""))
                 filtered.append(a)
-                kept_this_frame.add(aid)
+
+                # 只有真正通过点云检测的目标
+                # 才能刷新 temporal history
+                if passed_by_points:
+                    kept_this_frame.add(aid)
 
         _filter_actors(anns)
         if ego is not None:
