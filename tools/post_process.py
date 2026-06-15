@@ -86,7 +86,7 @@ def convert_semantic(run_dir):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Depth: raw BGRA .npy → decoded depth .npy (meters, float32)
+# Depth: .npy (float meters) → .png (uint16 cm)
 # ══════════════════════════════════════════════════════════════════════
 
 def convert_depth(run_dir):
@@ -97,16 +97,24 @@ def convert_depth(run_dir):
         npy_files = sorted(glob.glob(os.path.join(src_dir, "*.npy")))
         if not npy_files:
             continue
-        sample = np.load(npy_files[0])
-        if sample.ndim != 3 or sample.shape[2] != 4:
-            continue
         channel = os.path.basename(cam_dir)
-        print(f"{channel}/depth: decoding {len(npy_files)} files")
+        print(f"{channel}/depth: converting {len(npy_files)} .npy → .png (uint16 cm)")
         for npy_path in tqdm(npy_files, desc=f"{channel} depth", leave=True):
-            raw = np.load(npy_path)
-            from src.sensors import decode_depth
-            depth = decode_depth(raw)
-            np.save(npy_path, depth)
+            arr = np.load(npy_path)
+            if arr.ndim == 3 and arr.shape[2] == 4:
+                # BGRA encoded depth → decode to meters
+                R = arr[:, :, 2].astype(np.float32)
+                G = arr[:, :, 1].astype(np.float32)
+                B = arr[:, :, 0].astype(np.float32)
+                depth = R + G * 256.0 + B * 65536.0
+                depth = depth / 16777215.0 * 1000.0
+            else:
+                depth = arr  # already decoded (meters)
+            # quantize: 1 unit = 1 cm, clamp 0-655.35m
+            depth_u16 = np.clip(depth * 100.0, 0, 65535).astype(np.uint16)
+            png_path = npy_path.replace(".npy", ".png")
+            Image.fromarray(depth_u16).save(png_path)
+            os.remove(npy_path)
 
 
 # ══════════════════════════════════════════════════════════════════════

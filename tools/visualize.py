@@ -58,19 +58,20 @@ def _depth_visualization(run_dir, layout, quality, force_all=False):
         src_dir = os.path.join(cam_dir, "depth")
         if not os.path.isdir(src_dir):
             continue
-        npy_files = sorted(glob.glob(os.path.join(src_dir, "*.npy")))
-        if not npy_files:
+        png_files = sorted(glob.glob(os.path.join(src_dir, "*.png")))
+        if not png_files:
             continue
         viz_dir = os.path.join(cam_dir, "depth_viz")
         os.makedirs(viz_dir, exist_ok=True)
-        print(f"{cam_dir}/depth_viz: {len(npy_files)} files")
-        for npy_path in tqdm(npy_files, desc=f"{channel} depth_viz", leave=False):
-            depth = np.load(npy_path)
+        print(f"{cam_dir}/depth_viz: {len(png_files)} files")
+        for png_path in tqdm(png_files, desc=f"{channel} depth_viz", leave=False):
+            depth_cm = np.array(Image.open(png_path)).astype(np.float32)
+            depth = depth_cm / 100.0  # uint16 cm → meters
             clipped = np.clip(depth, 0.0, 250.0)
             normalized = 1.0 - clipped / 250.0
             normalized = normalized ** 0.4
             gray = (normalized * 255).astype(np.uint8)
-            fname = os.path.basename(npy_path).replace(".npy", ".png")
+            fname = os.path.basename(png_path)
             Image.fromarray(gray, mode="L").save(os.path.join(viz_dir, fname))
 
 
