@@ -191,9 +191,6 @@ class DataCollector:
 
                 extent = actor.bounding_box.extent
                 bx, by, bz = extent.x, extent.y, extent.z
-                if bx <= 0.01: bx = 2.0
-                if by <= 0.01: by = 1.0
-                if bz <= 0.01: bz = 0.75
                 t = actor.get_transform()
                 vel = actor.get_velocity()
 

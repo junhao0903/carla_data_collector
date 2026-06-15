@@ -423,7 +423,9 @@ def _count_points(pts, sx, sy, sz, ayaw_s, hx, hy, hz):
 def overall_filter_annotations(run_dir):
     """LiDAR point-count + temporal filtering."""
     filter_cfg = _load_filter_config()
-    min_pts = filter_cfg.get("min_points", 5)
+    _cls = _load_cls_config()
+    min_pts_floor = filter_cfg.get("min_pts", 3)
+    pts_per_m3 = filter_cfg.get("pts_per_m3", 5)
     temporal_s = filter_cfg.get("temporal_window", 0.5)
     fps = filter_cfg.get("rate_hz", 20)
     temporal_frames = max(1, int(temporal_s * fps))
@@ -478,7 +480,7 @@ def overall_filter_annotations(run_dir):
 
     occ_filtered_count = 0
     recent_ids = []
-    print(f"LiDAR filter: {len(ann_files)} frames (min_pts={min_pts}, temporal={temporal_s}s)")
+    print(f"LiDAR filter: {len(ann_files)} frames (floor={min_pts_floor}, pts/m³={pts_per_m3}, temporal={temporal_s}s)")
     for ann_path in tqdm(ann_files, desc="LiDAR filter", leave=True):
         frame = int(os.path.basename(ann_path).replace(".json", ""))
         lidar_path = os.path.join(lidar_dir, f"{frame:08d}.npy")
@@ -500,9 +502,11 @@ def overall_filter_annotations(run_dir):
             nonlocal occ_filtered_count
             for a in actor_list:
                 bb = a.get("bbox_3d", {})
-                hx = max(bb.get("x", 2.0) / 2, 1.0)
-                hy = max(bb.get("y", 2.0) / 2, 0.5)
-                hz = max(bb.get("z", 2.0) / 2, 0.5)
+                cat = _cls_category(a.get("type_id", ""))
+                dims = _cls.get(cat, {"x": 2.0, "y": 2.0, "z": 2.0})
+                hx = max(bb.get("x", dims["x"]) / 2, 0.5)
+                hy = max(bb.get("y", dims["y"]) / 2, 0.5)
+                hz = max(bb.get("z", dims["z"]) / 2, 0.5)
                 if ego is not None:
                     rot = a.get("rotation", {})
                     sx, sy, sz, sroll, spitch, syaw = _to_sensor_local(
@@ -515,8 +519,10 @@ def overall_filter_annotations(run_dir):
                     spitch = a.get("rotation", {}).get("pitch", 0)
                     syaw = a.get("rotation", {}).get("yaw", 0)
                 n = _count_points(pts, sx, sy, sz, syaw, hx, hy, hz)
+                volume = (2 * hx) * (2 * hy) * (2 * hz)
+                threshold = max(min_pts_floor, int(volume * pts_per_m3))
                 aid = a.get("actor_id", 0)
-                if n < min_pts and (not apply_temporal or aid not in temporal_keep):
+                if n < threshold and (not apply_temporal or aid not in temporal_keep):
                     occ_filtered_count += 1
                     continue
                 a["category"] = _category(a.get("type_id", ""))
@@ -574,11 +580,93 @@ def overall_filter_annotations(run_dir):
 # Main
 # ══════════════════════════════════════════════════════════════════════
 
+def _polygon_area(vertices):
+    """Shoelace formula for convex polygon area."""
+    if len(vertices) < 3:
+        return 0.0
+    x = vertices[:, 0]; y = vertices[:, 1]
+    return 0.5 * abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+
+
+def _clip_polygon_to_rect(poly, xmin, xmax, ymin, ymax):
+    """Sutherland-Hodgman clip convex polygon to axis-aligned rectangle."""
+    edges = [
+        (xmin, 0, lambda p: p >= xmin),
+        (xmax, 0, lambda p: p <= xmax),
+        (ymin, 1, lambda p: p >= ymin),
+        (ymax, 1, lambda p: p <= ymax),
+    ]
+    for val, dim, inside_fn in edges:
+        clipped = []
+        for i in range(len(poly)):
+            curr = poly[i]; prev = poly[i - 1]
+            c_in = inside_fn(curr[dim])
+            p_in = inside_fn(prev[dim])
+            if c_in:
+                if not p_in:
+                    t = (val - prev[dim]) / (curr[dim] - prev[dim])
+                    clipped.append(prev + t * (curr - prev))
+                clipped.append(curr)
+            elif p_in:
+                t = (val - prev[dim]) / (curr[dim] - prev[dim])
+                clipped.append(prev + t * (curr - prev))
+        if not clipped:
+            return np.empty((0, 2))
+        poly = np.array(clipped)
+    return poly
+
+
+def _load_cls_config():
+    """Load default bbox dimensions keyed by object category."""
+    for search in ["config/cls/default.yaml"]:
+        if os.path.exists(search):
+            import yaml
+            with open(search) as f:
+                return yaml.safe_load(f) or {}
+    return {}
+
+
+def _cls_category(type_id):
+    """Map CARLA type_id to cls config category key."""
+    s = str(type_id)
+    if "pedestrian" in s:
+        return "pedestrian"
+    for prefix in ["static."]:
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+            break
+    if s.startswith("vehicle."):
+        s = s[len("vehicle."):]
+
+    # explicit keyword matching (check full string and tokens)
+    s_lower = s.lower().replace("-", ".")
+    if any(k in s_lower for k in ["motorcycle", "bicycle", "truck", "bus", "train"]):
+        for k in ["motorcycle", "bicycle", "truck", "bus", "train"]:
+            if k in s_lower:
+                return k
+    # CARLA model-name matching for types that lack explicit keywords
+    _motorcycle = {"harley", "kawasaki", "ninja", "vespa", "yamaha", "yzf"}
+    _bicycle = {"crossbike", "diamondback", "gazelle", "omafiets"}
+    _bus = {"fusorosa", "mitsubishi"}
+    _truck = {"carlacola", "cybertruck", "ambulance", "firetruck", "european_hgv"}
+    tokens = set(s_lower.split("."))
+    if tokens & _bicycle:
+        return "bicycle"
+    if tokens & _motorcycle:
+        return "motorcycle"
+    if tokens & _bus:
+        return "bus"
+    if tokens & _truck:
+        return "truck"
+    return "vehicle"
+
+
 def annotate_camera(run_dir):
 
     layout = _load_sensor_layout(run_dir)
     if not layout:
         return
+    _cls = _load_cls_config()
 
     valid_dir = os.path.join(run_dir, "ANNO", "valid")
     if not os.path.isdir(valid_dir):
@@ -629,10 +717,12 @@ def annotate_camera(run_dir):
     # =========================
     # bbox corners
     # =========================
-    def make_corners(bb):
-        dx = max(bb.get("x", 2.0) / 2, 0.5)
-        dy = max(bb.get("y", 2.0) / 2, 0.25)
-        dz = max(bb.get("z", 2.0) / 2, 0.25)
+    def make_corners(bb, type_id=""):
+        cat = _cls_category(type_id)
+        dims = _cls.get(cat, {"x": 2.0, "y": 2.0, "z": 2.0})
+        dx = max(bb.get("x", dims["x"]) / 2, 0.25)
+        dy = max(bb.get("y", dims["y"]) / 2, 0.25)
+        dz = max(bb.get("z", dims["z"]) / 2, 0.25)
 
         return np.array([
             [ dx,  dy,  dz],
@@ -722,7 +812,6 @@ def annotate_camera(run_dir):
                     ego,
                     cam_offsets
                 )
-                print("[SENSOR POS]", "sx:", sx, "sy:", sy, "sz:", sz)
                 # debug point (VERY IMPORTANT)
                 # print("sensor xyz:", sx, sy, sz)
 
@@ -732,7 +821,7 @@ def annotate_camera(run_dir):
                 # =========================
                 # 2. bbox corners
                 # =========================
-                corners = make_corners(a.get("bbox_3d", {}))
+                corners = make_corners(a.get("bbox_3d", {}), a.get("type_id", ""))
 
                 R = Rotation.from_euler(
                     'xyz',
@@ -766,6 +855,22 @@ def annotate_camera(run_dir):
 
                 if xmax <= xmin or ymax <= ymin:
                     continue
+
+                # filter: visible fraction must be >= 20% of total projected area
+                from scipy.spatial import ConvexHull as _ConvexHull
+                pts_2d = np.column_stack([u, v])
+                if len(pts_2d) >= 3:
+                    try:
+                        hull = _ConvexHull(pts_2d)
+                        hull_verts = pts_2d[hull.vertices]
+                        full_area = _polygon_area(hull_verts)
+                        if full_area > 0:
+                            clipped = _clip_polygon_to_rect(hull_verts, 0, w - 1, 0, h - 1)
+                            visible = _polygon_area(clipped)
+                            if visible / full_area < 0.2:
+                                continue
+                    except Exception:
+                        pass
 
                 entry = dict(a)
                 entry["bbox_2d"] = [xmin, ymin, xmax, ymax]

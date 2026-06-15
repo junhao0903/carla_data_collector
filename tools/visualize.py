@@ -156,6 +156,14 @@ def _camera_annotation_viz(run_dir, layout, force_all=False):
                 x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
                 color = COLORS.get(a.get("category", "vehicle"), (0, 255, 0))
                 draw.rectangle([x1, y1, x2, y2], outline=color, width=1)
+                # show actor_id
+                aid = str(a.get("actor_id", ""))
+                if aid:
+                    tb = draw.textbbox((x1, y1), aid)
+                    tw, th = tb[2] - tb[0], tb[3] - tb[1]
+                    ty = y1 - th - 2 if y1 - th - 2 > 0 else y1
+                    draw.rectangle([x1, ty, x1 + tw + 2, ty + th + 1], fill=color)
+                    draw.text((x1 + 1, ty), aid, fill=(0, 0, 0))
             img.save(os.path.join(viz_dir, fname))
 
 
