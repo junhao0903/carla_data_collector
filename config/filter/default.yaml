@@ -23,6 +23,6 @@ transform:           # mount position relative to ego vehicle
   yaw: 0.0
 
 output: true          # 输出点云 + 标注，供后处理 annotation 过滤使用
-min_pts: 3            # minimum point floor (for tiny objects)
+min_pts: 5            # minimum point floor (for tiny objects)
 pts_per_m3: 1.5       # points per m³; bbox vol × pts_per_m3 = threshold
-temporal_window: 0.5  # seconds: if kept in this window, force-keep in subsequent frames
+temporal_window: 0.1  # seconds: if kept in this window, force-keep in subsequent frames

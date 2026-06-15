@@ -413,11 +413,12 @@ def _to_sensor_local(
     )
 
 
-def _count_points(pts, sx, sy, sz, ayaw_s, hx, hy, hz):
-    dx = pts[:, 0] - sx; dy = pts[:, 1] - sy; dz = pts[:, 2] - sz
+def _count_points(pts, sx, sy, ayaw_s, hx, hy):
+    """Count LiDAR points inside 2D bounding box (BEV projection)."""
+    dx = pts[:, 0] - sx; dy = pts[:, 1] - sy
     yaw = m.radians(ayaw_s); cr, sr = m.cos(yaw), m.sin(yaw)
     lx = dx * cr + dy * sr; ly = -dx * sr + dy * cr
-    return int(((np.abs(lx) <= hx) & (np.abs(ly) <= hy) & (np.abs(dz) <= hz)).sum())
+    return int(((np.abs(lx) <= hx) & (np.abs(ly) <= hy)).sum())
 
 
 def overall_filter_annotations(run_dir):
@@ -515,7 +516,7 @@ def overall_filter_annotations(run_dir):
                     sroll = a.get("rotation", {}).get("roll", 0)
                     spitch = a.get("rotation", {}).get("pitch", 0)
                     syaw = a.get("rotation", {}).get("yaw", 0)
-                n = _count_points(pts, sx, sy, sz, syaw, hx, hy, hz)
+                n = _count_points(pts, sx, sy, syaw, hx, hy)
                 volume = (2 * hx) * (2 * hy) * (2 * hz)
                 threshold = max(min_pts_floor, int(volume * pts_per_m3))
                 aid = a.get("actor_id", 0)
