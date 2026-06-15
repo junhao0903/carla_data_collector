@@ -6,7 +6,7 @@ carla:
   timeout_seconds: 60.0
   weather: ClearNoon
 collection:
-  duration_seconds: 10
+  frame_count: 50
   motion_consecutive_ticks: 1
   motion_speed_kmh: 5
   motion_timeout_ticks: 500

@@ -124,24 +124,27 @@ class DataCollector:
         self._init_annotations()
         print(f"Attached sensors: {', '.join(self._sensors.keys())}")
 
-        duration = self._config.get("collection", {}).get("duration_seconds", 0)
-        start_time = time.time()
-        if duration > 0:
-            h, r = divmod(duration, 3600)
-            m, s = divmod(r, 60)
-            total_str = f"{int(h):d}h{int(m):02d}m{int(s):02d}s" if h else f"{int(m):d}m{int(s):02d}s"
-            pbar = tqdm(total=duration, desc="Collecting", unit="s",
-                        bar_format="{desc}: {percentage:.0f}%|{bar}| {elapsed} / " + total_str,
+        # Warmup ticks after sensor attachment — first 1-2 ticks may not produce data
+        sensor_warmup = col.get("sensor_warmup_ticks", 3)
+        for _ in range(sensor_warmup):
+            self._world.tick()
+
+        frame_limit = self._config.get("collection", {}).get("frame_count", 0)
+        if frame_limit > 0:
+            pbar = tqdm(total=frame_limit, desc="Collecting", unit="f",
+                        bar_format="{desc}: {percentage:.0f}%|{bar}| {n_fmt}/{total_fmt} frames",
                         dynamic_ncols=True)
         else:
             pbar = None
         _static_saved = False
+        _ticks = 0
         try:
             while True:
                 from .sensors import set_world_frame
                 frame = self._world.get_snapshot().frame + 1
                 set_world_frame(frame)
                 self._world.tick()
+                _ticks += 1
 
                 if not _static_saved:
                     self._save_global_static_bboxes()
@@ -150,10 +153,9 @@ class DataCollector:
                 self._record_ego_pose(frame)
 
                 if pbar is not None:
-                    elapsed = time.time() - start_time
-                    pbar.n = min(elapsed, duration)
+                    pbar.n = min(_ticks, frame_limit)
                     pbar.refresh()
-                if duration > 0 and (time.time() - start_time) >= duration:
+                if frame_limit > 0 and _ticks >= frame_limit:
                     break
         except KeyboardInterrupt:
             print("\nInterrupted, shutting down...")
