@@ -12,9 +12,7 @@ CARLA 0.9.x 仿真数据自动采集工具。
 > - `config/main/default.yaml` → `launch_command: ["/你的路径/carlaUE4.sh"]`（以及 `config/main/` 下其他 yaml）
 ```bash
 conda activate carla
-bash scripts/start_carla.sh        # 启动 CARLA（后台运行）
 python run.py                       # 运行采集
-bash scripts/stop_carla.sh         # 停止 CARLA
 
 # 可使用其他主配置
 python run.py config/main/other.yaml
@@ -150,7 +148,7 @@ output/<YYYYMMDD_HHMMSS>/
 
 CARLA (Unreal) 原生坐标系为**左手系**：X=前, Y=**右**, Z=上, yaw+=**右转**
 
-变换规则：**Y 取负, roll 取负, yaw 取负, pitch 不变**
+变换规则：**Y 取负, pitch 取负, yaw 取负, roll 不变**
 
 ### 标注 location 说明
 
