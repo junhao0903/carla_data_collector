@@ -423,7 +423,6 @@ def _count_points(pts, sx, sy, sz, ayaw_s, hx, hy, hz):
 def overall_filter_annotations(run_dir):
     """LiDAR point-count + temporal filtering."""
     filter_cfg = _load_filter_config()
-    _cls = _load_cls_config()
     min_pts_floor = filter_cfg.get("min_pts", 3)
     pts_per_m3 = filter_cfg.get("pts_per_m3", 5)
     temporal_s = filter_cfg.get("temporal_window", 0.5)
@@ -502,11 +501,9 @@ def overall_filter_annotations(run_dir):
             nonlocal occ_filtered_count
             for a in actor_list:
                 bb = a.get("bbox_3d", {})
-                cat = _cls_category(a.get("type_id", ""))
-                dims = _cls.get(cat, {"x": 2.0, "y": 2.0, "z": 2.0})
-                hx = max(bb.get("x", dims["x"]) / 2, 0.5)
-                hy = max(bb.get("y", dims["y"]) / 2, 0.5)
-                hz = max(bb.get("z", dims["z"]) / 2, 0.5)
+                hx = bb["x"] / 2
+                hy = bb["y"] / 2
+                hz = bb["z"] / 2
                 if ego is not None:
                     rot = a.get("rotation", {})
                     sx, sy, sz, sroll, spitch, syaw = _to_sensor_local(
@@ -617,7 +614,6 @@ def _clip_polygon_to_rect(poly, xmin, xmax, ymin, ymax):
 
 
 def _load_cls_config():
-    """Load default bbox dimensions keyed by object category."""
     for search in ["config/cls/default.yaml"]:
         if os.path.exists(search):
             import yaml
@@ -637,28 +633,67 @@ def _cls_category(type_id):
             break
     if s.startswith("vehicle."):
         s = s[len("vehicle."):]
-
-    # explicit keyword matching (check full string and tokens)
     s_lower = s.lower().replace("-", ".")
     if any(k in s_lower for k in ["motorcycle", "bicycle", "truck", "bus", "train"]):
         for k in ["motorcycle", "bicycle", "truck", "bus", "train"]:
             if k in s_lower:
                 return k
-    # CARLA model-name matching for types that lack explicit keywords
     _motorcycle = {"harley", "kawasaki", "ninja", "vespa", "yamaha", "yzf"}
     _bicycle = {"crossbike", "diamondback", "gazelle", "omafiets"}
     _bus = {"fusorosa", "mitsubishi"}
     _truck = {"carlacola", "cybertruck", "ambulance", "firetruck", "european_hgv"}
     tokens = set(s_lower.split("."))
-    if tokens & _bicycle:
-        return "bicycle"
-    if tokens & _motorcycle:
-        return "motorcycle"
-    if tokens & _bus:
-        return "bus"
-    if tokens & _truck:
-        return "truck"
+    if tokens & _bicycle: return "bicycle"
+    if tokens & _motorcycle: return "motorcycle"
+    if tokens & _bus: return "bus"
+    if tokens & _truck: return "truck"
     return "vehicle"
+
+
+def _ensure_bbox_3d(annotations):
+    """Patch bbox_3d with cls config defaults for any dimension <= 0."""
+    cls = _load_cls_config()
+    for a in annotations:
+        bb = a.get("bbox_3d", {})
+        cat = _cls_category(a.get("type_id", ""))
+        dims = cls.get(cat, {"x": 2.0, "y": 2.0, "z": 2.0})
+        if bb.get("x", 0) <= 0:
+            bb["x"] = dims["x"]
+        if bb.get("y", 0) <= 0:
+            bb["y"] = dims["y"]
+        if bb.get("z", 0) <= 0:
+            bb["z"] = dims["z"]
+        a["bbox_3d"] = bb
+
+
+def ensure_bbox_dims(run_dir):
+    """Patch ANNO files: fill bbox_3d with cls defaults for dimensions <= 0."""
+    import glob as _glob
+
+    patch_count = 0
+    # dynamic actors
+    dyn_dir = os.path.join(run_dir, "ANNO", "dynamic_actors")
+    if os.path.isdir(dyn_dir):
+        for path in _glob.glob(os.path.join(dyn_dir, "*.json")):
+            with open(path) as f:
+                anns = json.load(f)
+            _ensure_bbox_3d(anns)
+            with open(path, "w") as f:
+                json.dump(anns, f)
+            patch_count += len(anns)
+
+    # static bboxes
+    static_path = os.path.join(run_dir, "ANNO", "static_bboxes.json")
+    if os.path.exists(static_path):
+        with open(static_path) as f:
+            anns = json.load(f)
+        _ensure_bbox_3d(anns)
+        with open(static_path, "w") as f:
+            json.dump(anns, f)
+        patch_count += len(anns)
+
+    if patch_count > 0:
+        print(f"  Bbox patched: {patch_count} annotations")
 
 
 def annotate_camera(run_dir):
@@ -666,8 +701,6 @@ def annotate_camera(run_dir):
     layout = _load_sensor_layout(run_dir)
     if not layout:
         return
-    _cls = _load_cls_config()
-
     valid_dir = os.path.join(run_dir, "ANNO", "valid")
     if not os.path.isdir(valid_dir):
         return
@@ -717,12 +750,10 @@ def annotate_camera(run_dir):
     # =========================
     # bbox corners
     # =========================
-    def make_corners(bb, type_id=""):
-        cat = _cls_category(type_id)
-        dims = _cls.get(cat, {"x": 2.0, "y": 2.0, "z": 2.0})
-        dx = max(bb.get("x", dims["x"]) / 2, 0.25)
-        dy = max(bb.get("y", dims["y"]) / 2, 0.25)
-        dz = max(bb.get("z", dims["z"]) / 2, 0.25)
+    def make_corners(bb):
+        dx = bb["x"] / 2
+        dy = bb["y"] / 2
+        dz = bb["z"] / 2
 
         return np.array([
             [ dx,  dy,  dz],
@@ -821,7 +852,7 @@ def annotate_camera(run_dir):
                 # =========================
                 # 2. bbox corners
                 # =========================
-                corners = make_corners(a.get("bbox_3d", {}), a.get("type_id", ""))
+                corners = make_corners(a.get("bbox_3d", {}))
 
                 R = Rotation.from_euler(
                     'xyz',
@@ -1066,6 +1097,7 @@ def post_process(run_dir):
         ("Async Sim", lambda: simulate_async(run_dir)),
         ("Align Frames", lambda: align_frames(run_dir)),
         ("Remap IDs", lambda: remap_static_ids(run_dir)),
+        ("Bbox Patch", lambda: ensure_bbox_dims(run_dir)),
         ("Overall Filter", lambda: overall_filter_annotations(run_dir)),
         ("LiDAR Annotate", lambda: annotate_lidar(run_dir)),
         ("Camera Annotate", lambda: annotate_camera(run_dir)),
