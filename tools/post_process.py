@@ -8,6 +8,7 @@ import numpy as np
 from tqdm import tqdm
 from PIL import Image
 from scipy.spatial.transform import Rotation
+from scipy.ndimage import label as _nd_label
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -858,18 +859,18 @@ def annotate_camera(run_dir):
 
                 # ── 6. semantic visibility ──
                 visibility = 1.0
+                num_components = 0
                 if semantic_img is not None:
                     roi = semantic_img[ymin_c:ymax_c, xmin_c:xmax_c]
                     tags = _target_tags(a.get("category", "vehicle"))
                     visible_pixels = sum(int((roi == t).sum()) for t in tags)
                     visibility = visible_pixels / clip_area
 
-                # ── 7. filter by visibility ──
-                if visibility < _vis_threshold(a.get("category", "vehicle")):
-                    total_filtered += 1
-                    continue
+                    # ── 6b. connected components (for occlusion correction) ──
+                    mask = np.isin(roi, list(tags))
+                    _labeled, num_components = _nd_label(mask)
 
-                # ── 8. save ──
+                # ── store intermediate ──
                 entry = dict(a)
                 entry["bbox_2d"] = [xmin_c, ymin_c, xmax_c, ymax_c]
                 entry["bbox_original"] = [int(xmin_o), int(ymin_o), int(xmax_o), int(ymax_o)]
@@ -880,12 +881,71 @@ def annotate_camera(run_dir):
                     "y": float(sy),
                     "z": float(sz),
                 }
-
+                entry["_num_components"] = int(num_components)
                 projected.append(entry)
+
+            # ── 6c. same-class occlusion correction ──
+            def _bbox_overlap(b1, b2):
+                """Return (iou, containment) — containment = inter / min(area)."""
+                x1, x2 = max(b1[0], b2[0]), min(b1[2], b2[2])
+                y1, y2 = max(b1[1], b2[1]), min(b1[3], b2[3])
+                if x1 >= x2 or y1 >= y2:
+                    return 0.0, 0.0
+                inter = (x2 - x1) * (y2 - y1)
+                a1 = (b1[2] - b1[0]) * (b1[3] - b1[1])
+                a2 = (b2[2] - b2[0]) * (b2[3] - b2[1])
+                iou = inter / (a1 + a2 - inter)
+                containment = inter / min(a1, a2)
+                return iou, containment
+
+            for i in range(len(projected)):
+                a = projected[i]
+                if a.get("_occluded"):
+                    continue
+                bbox_a = a["bbox_2d"]
+                sx_a = a["location"]["x"]
+                cat_a = a.get("category", "vehicle")
+                nc_a = a.get("_num_components", 0)
+
+                for j in range(len(projected)):
+                    if i == j:
+                        continue
+                    b = projected[j]
+                    if b.get("category") != cat_a:
+                        continue
+                    if nc_a == 0:
+                        continue
+
+                    bbox_b = b["bbox_2d"]
+                    sx_b = b["location"]["x"]
+                    iou, containment = _bbox_overlap(bbox_a, bbox_b)
+                    overlap = iou > 0.8 or containment > 0.9
+
+                    # fully occluded: high overlap + behind + single component
+                    if overlap and sx_a > sx_b and nc_a == 1:
+                        a["_occluded"] = True
+                        a["visibility"] = round(a["visibility"] * 0.1, 4)
+                        break
+                    # partially occluded: moderate overlap + behind + multiple components
+                    elif (iou > 0.5 or containment > 0.7) and sx_a > sx_b and nc_a > 1:
+                        a["visibility"] = round(a["visibility"] * 0.5, 4)
+
+            # ── 7. visibility filter ──
+            filtered = []
+            for a in projected:
+                if a.get("_occluded"):
+                    total_filtered += 1
+                    continue
+                if a["visibility"] < _vis_threshold(a.get("category", "vehicle")):
+                    total_filtered += 1
+                    continue
+                a.pop("_num_components", None)
+                a.pop("_occluded", None)
+                filtered.append(a)
 
             out_path = os.path.join(ann_dir, f"{frame:08d}.json")
             with open(out_path, "w") as f:
-                json.dump(projected, f)
+                json.dump(filtered, f)
 
         print(f"[OK] {channel} (semantic filtered: {total_filtered})")
 
