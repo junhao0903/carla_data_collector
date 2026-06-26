@@ -275,8 +275,7 @@ def align_frames(run_dir):
             if os.path.isdir(sd) and sd not in all_dirs: all_dirs.append(sd)
     da_dir = os.path.join(run_dir, "ANNO", "dynamic_actors")
     if os.path.isdir(da_dir) and da_dir not in all_dirs: all_dirs.append(da_dir)
-    for d in [os.path.join(run_dir, "OCC", "original"),
-              os.path.join(run_dir, "LIDAR_FILTER", "annotations")]:
+    for d in [os.path.join(run_dir, "OCC", "original")]:
         if os.path.isdir(d) and d not in all_dirs: all_dirs.append(d)
 
     frame_sets = []
@@ -979,8 +978,6 @@ def annotate_lidar(run_dir):
         if s["modality"] not in ("lidar", "lidar_semantic"):
             continue
         channel = s["channel"]
-        if channel == "LIDAR_FILTER":
-            continue
         out = s.get("output", {})
         lidar_range = out.get("range", 100)
         upper_fov = m.radians(out.get("upper_fov", 10))

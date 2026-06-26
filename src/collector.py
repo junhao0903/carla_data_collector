@@ -112,15 +112,6 @@ class DataCollector:
             if sensor_id in self._sensors:
                 self._rgb_sensors[spec["channel"]] = self._sensors[sensor_id]
 
-        # Spawn dedicated filter LiDAR if configured (independent of sensor layout)
-        self._filter_lidar = None
-        self._filter_lidar_channel = "__filter__"
-        self._filter_min_pts = 10
-        filter_cfg = self._config.get("_filter_config", {})
-        if filter_cfg.get("enabled", True):
-            self._setup_filter_lidar(self._world, bp_lib, self._vehicle, filter_cfg)
-            self._filter_min_pts = filter_cfg.get("min_points", 10)
-
         self._init_annotations()
         print(f"Attached sensors: {', '.join(self._sensors.keys())}")
 
@@ -315,38 +306,6 @@ class DataCollector:
             _json.dump({"map": town, "pc_range": pc_range,
                          "voxel_size": voxel_size, "shape": shape}, f)
         print(f"Static OCC saved to {npy_path} ({occ.nbytes / 1e6:.0f} MB)")
-
-    def _setup_filter_lidar(self, world, bp_lib, vehicle, cfg):
-        bp = bp_lib.find(cfg.get("blueprint", "sensor.lidar.ray_cast"))
-        bp.set_attribute("channels", str(cfg.get("channels", 64)))
-        bp.set_attribute("range", str(cfg.get("range", 100)))
-        bp.set_attribute("points_per_second", str(cfg.get("points_per_second", 56000)))
-        bp.set_attribute("rotation_frequency", str(cfg.get("rotation_frequency", 10)))
-
-        from .sensors import _make_transform, _sensor_data, _sensor_frames
-        transform = _make_transform(cfg.get("transform", {}))
-        sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
-
-        channel = self._filter_lidar_channel
-        save_dir = None
-        if cfg.get("output", False):
-            save_dir = os.path.join(self._output_dir, "LIDAR_FILTER", "original")
-            os.makedirs(save_dir, exist_ok=True)
-
-        def _filter_lidar_cb(data):
-            _sensor_frames[channel] = data.frame
-            points = np.frombuffer(data.raw_data, dtype=np.float32).copy()
-            points = points.reshape((-1, 4))
-            points[:, 1] = -points[:, 1]
-            _sensor_data[channel] = points
-            if save_dir is not None:
-                np.save(os.path.join(save_dir, f"{data.frame:08d}.npy"), points)
-
-        sensor.listen(_filter_lidar_cb)
-        self._filter_lidar = sensor
-        self._sensors["__filter_lidar__"] = sensor
-        if save_dir is not None:
-            self._lidar_sensors["LIDAR_FILTER"] = sensor
 
     def _build_sensor_layout(self, world_fps):
         layout = self._config.get("_sensor_layout", {})
