@@ -9,7 +9,6 @@ sensors:
     rate_hz: 20
     depth: true         # 生成深度图
     depth_vis: true        # 深度图可视化
-    semantic: true         # 生成语义分割图
     semantic_vis: true     # 语义分割可视化
     annotation_vis: true   # 标注可视化
     transform:
@@ -35,7 +34,6 @@ sensors:
     enabled: true
     rate_hz: 20
     depth: true
-    semantic: true
     semantic_vis: true
     annotation_vis: true
     transform:
@@ -61,7 +59,6 @@ sensors:
     enabled: true
     rate_hz: 20
     depth: true
-    semantic: true
     semantic_vis: true
     annotation_vis: true
     transform:

@@ -139,7 +139,7 @@ def get_sensor_data():
 
 def _camera_callback(save_dir, channel):
     def cb(image):
-        frame = image.frame - 1  # camera rendering lags one tick behind physics
+        frame = image.frame  # camera rendering lags one tick behind physics
         _sensor_frames[channel] = frame
         array = np.frombuffer(image.raw_data, dtype=np.uint8)
         array = array.reshape((image.height, image.width, 4))
@@ -180,7 +180,7 @@ def _depth_callback(save_dir):
         else:
             array = array.reshape((h, w))
             depth = array.astype(np.float32)
-        np.save(os.path.join(save_dir, f"{image.frame - 1:08d}.npy"), depth)
+        np.save(os.path.join(save_dir, f"{image.frame:08d}.npy"), depth)
 
     return cb
 
@@ -244,7 +244,7 @@ def _semantic_callback(save_dir):
         else:
             tags = array.reshape((h, w))
         img = Image.fromarray(tags, mode="L")
-        img.save(os.path.join(save_dir, f"{image.frame - 1:08d}.png"))
+        img.save(os.path.join(save_dir, f"{image.frame:08d}.png"))
 
     return cb
 
