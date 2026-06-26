@@ -1,28 +1,7 @@
-# Annotation filter LiDAR — spawned independently of sensor layout
-# Used for filtering bbox annotations by point count
+# Annotation filter config
+# max_range: range filter (overall_filter_annotations)
+# min_pts / pts_per_m3: point-count filter (annotate_lidar)
 
-enabled: true
-blueprint: sensor.lidar.ray_cast
-rate_hz: 20          # must match or exceed world FPS
-
-channels: 128
-range: 200
-points_per_second: 3200000
-rotation_frequency: 20
-
-upper_fov: 10
-lower_fov: -30
-horizontal_fov: 360
-
-transform:           # mount position relative to ego vehicle
-  x: 0.0
-  y: 0.0
-  z: 1.8
-  roll: 0.0
-  pitch: 0.0
-  yaw: 0.0
-
-output: true          # 输出点云 + 标注，供后处理 annotation 过滤使用
-min_pts: 5            # minimum point floor (for tiny objects)
-pts_per_m3: 1.5       # points per m³; bbox vol × pts_per_m3 = threshold
-temporal_window: 0.5  # seconds: if kept in this window, force-keep in subsequent frames
+max_range: 100.0         # meters — baselink range filter
+min_pts: 3               # minimum point floor (for tiny objects)
+pts_per_m3: 1.5           # points per m³; bbox vol × pts_per_m3 = threshold

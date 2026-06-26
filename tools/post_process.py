@@ -60,7 +60,6 @@ def _load_grid_params(run_dir):
     return (-20, 80, -40, 40, -2, 4, 0.5)
 
 
-
 # ══════════════════════════════════════════════════════════════════════
 # Semantic: raw BGRA .npy → tag PNG
 # ══════════════════════════════════════════════════════════════════════
@@ -197,7 +196,9 @@ def generate_gt_occ(run_dir, ann_dir, ego_csv, meta_path):
             carla.Rotation(roll=eroll, pitch=-epitch, yaw=-eyaw))
         dynamic_list = []
         for a in anns:
-            loc = a["location"]; rot = a["rotation"]; sz = a["bbox_3d"]
+            loc = a["location"];
+            rot = a["rotation"];
+            sz = a["bbox_3d"]
             # AD coords (Y=left) → CARLA world (Y=right)
             actor_tf = carla.Transform(
                 carla.Location(x=loc["x"], y=-loc["y"], z=loc["z"]),
@@ -226,7 +227,6 @@ def generate_occ(run_dir, layout=None):
         if os.path.exists(ego_csv) and os.path.exists(meta_path):
             generate_gt_occ(run_dir, ann_dir, ego_csv, meta_path)
             return
-
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -280,7 +280,7 @@ def align_frames(run_dir):
 
     frame_sets = []
     for ad in all_dirs:
-        frames = {int(f.replace('.json','').replace('.npy','').replace('.jpg','').replace('.png',''))
+        frames = {int(f.replace('.json', '').replace('.npy', '').replace('.jpg', '').replace('.png', ''))
                   for f in os.listdir(ad)}
         if frames: frame_sets.append((ad, frames))
     if len(frame_sets) < 2:
@@ -293,7 +293,8 @@ def align_frames(run_dir):
             for ext in ['.json', '.npy', '.jpg', '.png']:
                 fp = os.path.join(ad, f'{frm:08d}{ext}')
                 if os.path.exists(fp):
-                    os.remove(fp); trimmed += 1
+                    os.remove(fp);
+                    trimmed += 1
     print(f"  Frame alignment: range [{min(common):08d}-{max(common):08d}], removed {trimmed} files")
 
     for csv_path in [os.path.join(run_dir, "GNSS", "data.csv"),
@@ -316,10 +317,10 @@ def align_frames(run_dir):
 
 
 def _to_sensor_local(
-    ax_ad, ay_ad, az_ad,
-    aroll_ad, apitch_ad, ayaw_ad,
-    ego,
-    sensor_offsets
+        ax_ad, ay_ad, az_ad,
+        aroll_ad, apitch_ad, ayaw_ad,
+        ego,
+        sensor_offsets
 ):
     """
     World(AD) -> Sensor
@@ -332,7 +333,7 @@ def _to_sensor_local(
     ex, ey, ez, eroll, epitch, eyaw = ego
 
     sx_off, sy_off, sz_off, \
-    sroll_off, spitch_off, syaw_off = sensor_offsets
+        sroll_off, spitch_off, syaw_off = sensor_offsets
 
     # --------------------------------------------------
     # world -> ego
@@ -370,8 +371,8 @@ def _to_sensor_local(
     R_world_sensor = R_world_ego @ R_ego_sensor
 
     t_world_sensor = (
-        t_world_ego +
-        R_world_ego @ t_ego_sensor
+            t_world_ego +
+            R_world_ego @ t_ego_sensor
     )
 
     # --------------------------------------------------
@@ -384,9 +385,9 @@ def _to_sensor_local(
     ])
 
     p_sensor = (
-        R_world_sensor.T
-        @
-        (p_world - t_world_sensor)
+            R_world_sensor.T
+            @
+            (p_world - t_world_sensor)
     )
 
     # --------------------------------------------------
@@ -399,9 +400,9 @@ def _to_sensor_local(
     ).as_matrix()
 
     R_sensor_obj = (
-        R_world_sensor.T
-        @
-        R_world_obj
+            R_world_sensor.T
+            @
+            R_world_obj
     )
 
     sroll, spitch, syaw = Rotation.from_matrix(
@@ -423,35 +424,28 @@ def _to_sensor_local(
 
 def _count_points(pts, sx, sy, ayaw_s, hx, hy):
     """Count LiDAR points inside 2D bounding box (BEV projection)."""
-    dx = pts[:, 0] - sx; dy = pts[:, 1] - sy
-    yaw = m.radians(ayaw_s); cr, sr = m.cos(yaw), m.sin(yaw)
-    lx = dx * cr + dy * sr; ly = -dx * sr + dy * cr
+    dx = pts[:, 0] - sx;
+    dy = pts[:, 1] - sy
+    yaw = m.radians(ayaw_s);
+    cr, sr = m.cos(yaw), m.sin(yaw)
+    lx = dx * cr + dy * sr;
+    ly = -dx * sr + dy * cr
     return int(((np.abs(lx) <= hx) & (np.abs(ly) <= hy)).sum())
 
 
 def overall_filter_annotations(run_dir):
-    """LiDAR point-count + temporal filtering."""
+    """Range-based filter in baselink coords."""
     filter_cfg = _load_filter_config()
-    min_pts_floor = filter_cfg.get("min_pts", 3)
-    pts_per_m3 = filter_cfg.get("pts_per_m3", 5)
-    temporal_s = filter_cfg.get("temporal_window", 0.5)
-    fps = filter_cfg.get("rate_hz", 20)
-    temporal_frames = max(1, int(temporal_s * fps))
+    max_range = filter_cfg.get("max_range", filter_cfg.get("range", 100.0))
 
     ann_dir = os.path.join(run_dir, "ANNO", "dynamic_actors")
     if not os.path.isdir(ann_dir):
-        print("LiDAR filter: no ANNO/dynamic_actors, skipping")
+        print("Range filter: no ANNO/dynamic_actors, skipping")
         return
-    lidar_dir = os.path.join(run_dir, "LIDAR_FILTER", "original")
-    if not os.path.isdir(lidar_dir):
-        print("LiDAR filter: no filter LiDAR data, skipping")
-        return
-    out_dir = os.path.join(run_dir, "LIDAR_FILTER", "annotations")
-    os.makedirs(out_dir, exist_ok=True)
     valid_dir = os.path.join(run_dir, "ANNO", "valid")
     os.makedirs(valid_dir, exist_ok=True)
 
-    # Load ego poses in AD coords (X=fwd, Y=left) and LiDAR offset
+    # Load ego poses in AD coords
     ego_ad = {}
     ego_csv = os.path.join(run_dir, "TRAJ", "ego_trajectory.csv")
     if os.path.exists(ego_csv):
@@ -460,15 +454,6 @@ def overall_filter_annotations(run_dir):
                 ego_ad[int(row["frame"])] = (
                     float(row["x"]), float(row["y_left"]), float(row["z"]),
                     float(row["roll_left"]), float(row["pitch"]), float(row["yaw_left"]))
-    lidar_tf = filter_cfg.get("transform", {})
-    lidar_offsets = (
-        lidar_tf.get("x", 0.0),
-        lidar_tf.get("y", 0.0),
-        lidar_tf.get("z", 1.8),
-        m.radians(lidar_tf.get("roll", 0.0)),
-        m.radians(lidar_tf.get("pitch", 0.0)),
-        m.radians(lidar_tf.get("yaw", 0.0)),
-    )
 
     # Load static bboxes (global AD coords)
     static_bboxes = []
@@ -486,112 +471,48 @@ def overall_filter_annotations(run_dir):
         if str(type_id).startswith("walker.pedestrian."): return "pedestrian"
         return "vehicle"
 
-    occ_filtered_count = 0
-    recent_ids = []
-    print(f"LiDAR filter: {len(ann_files)} frames (floor={min_pts_floor}, pts/m³={pts_per_m3}, temporal={temporal_s}s)")
-    for ann_path in tqdm(ann_files, desc="LiDAR filter", leave=True):
+    total_dynamic_kept = 0
+    total_dynamic_filtered = 0
+    print(f"Range filter: {len(ann_files)} frames (max_range={max_range}m)")
+    for ann_path in tqdm(ann_files, desc="Range filter", leave=True):
         frame = int(os.path.basename(ann_path).replace(".json", ""))
-        lidar_path = os.path.join(lidar_dir, f"{frame:08d}.npy")
-        if not os.path.exists(lidar_path):
+        ego = ego_ad.get(frame)
+        if ego is None:
             continue
-        pts = np.load(lidar_path)
+        ex, ey, ez = ego[0], ego[1], ego[2]
+
         with open(ann_path) as f:
             anns = json.load(f)
 
-        ego = ego_ad.get(frame)
-        temporal_keep = set()
-        for s in recent_ids:
-            temporal_keep |= s
-
         filtered = []
-        kept_this_frame = set()
 
-        def _filter_actors(actor_list, apply_temporal=True):
-            nonlocal occ_filtered_count
-            for a in actor_list:
-                bb = a.get("bbox_3d", {})
-                hx = bb["x"] / 2
-                hy = bb["y"] / 2
-                hz = bb["z"] / 2
-                if ego is not None:
-                    rot = a.get("rotation", {})
-                    sx, sy, sz, sroll, spitch, syaw = _to_sensor_local(
-                        a["location"]["x"], a["location"]["y"], a["location"]["z"],
-                        rot.get("roll", 0), rot.get("pitch", 0), rot.get("yaw", 0),
-                        ego, lidar_offsets)
-                else:
-                    sx, sy, sz = a["location"]["x"], a["location"]["y"], a["location"]["z"]
-                    sroll = a.get("rotation", {}).get("roll", 0)
-                    spitch = a.get("rotation", {}).get("pitch", 0)
-                    syaw = a.get("rotation", {}).get("yaw", 0)
-                n = _count_points(pts, sx, sy, syaw, hx, hy)
-                volume = (2 * hx) * (2 * hy) * (2 * hz)
-                threshold = max(min_pts_floor, int(volume * pts_per_m3))
-                aid = a.get("actor_id", 0)
+        # dynamic actors
+        for a in anns:
+            ax = a["location"]["x"]
+            ay = a["location"]["y"]
+            az = a["location"]["z"]
+            d = m.sqrt((ax - ex) ** 2 + (ay - ey) ** 2 + (az - ez) ** 2)
+            if d > max_range:
+                total_dynamic_filtered += 1
+                continue
+            total_dynamic_kept += 1
+            filtered.append(a)
 
-                passed_by_points = (n >= threshold)
+        # static bboxes within range
+        for sb in static_bboxes:
+            sx, sy, sz = sb["location"]["x"], sb["location"]["y"], sb["location"]["z"]
+            d = m.sqrt((sx - ex) ** 2 + (sy - ey) ** 2 + (sz - ez) ** 2)
+            if d <= max_range:
+                entry = dict(sb)
+                entry.setdefault("category", _category(entry.get("type_id", "")))
+                filtered.append(entry)
 
-                # 点数不足
-                if not passed_by_points:
-                    # 不在时间窗口内，直接过滤
-                    if (not apply_temporal) or (aid not in temporal_keep):
-                        occ_filtered_count += 1
-                        continue
-
-                # 保留
-                a["category"] = _category(a.get("type_id", ""))
-                filtered.append(a)
-
-                # 只有真正通过点云检测的目标
-                # 才能刷新 temporal history
-                if passed_by_points:
-                    kept_this_frame.add(aid)
-
-        _filter_actors(anns)
-        if ego is not None:
-            _filter_actors(static_bboxes, apply_temporal=True)
-
-        # Save global AD coords to ANNO/valid/
         valid_path = os.path.join(valid_dir, f"{frame:08d}.json")
         with open(valid_path, "w") as f:
             json.dump(filtered, f)
 
-        # Convert to sensor-local AD for LIDAR_FILTER/annotations/ (copy, don't mutate)
-        out_path = os.path.join(out_dir, f"{frame:08d}.json")
-        if ego is not None:
-            sensor_local = []
-            for a in filtered:
-                rot = a.get("rotation", {})
-                sx, sy, sz, sroll, spitch, syaw = _to_sensor_local(
-                    a["location"]["x"], a["location"]["y"], a["location"]["z"],
-                    rot.get("roll", 0), rot.get("pitch", 0), rot.get("yaw", 0),
-                    ego, lidar_offsets)
-                entry = dict(a)
-                entry["location"] = {"x": sx, "y": sy, "z": sz}
-                entry["rotation"] = {"roll": sroll, "pitch": spitch, "yaw": syaw}
-                sensor_local.append(entry)
-            with open(out_path, "w") as f:
-                json.dump(sensor_local, f)
-        else:
-            with open(out_path, "w") as f:
-                json.dump(filtered, f)
-        recent_ids.append(kept_this_frame)
-        if len(recent_ids) > temporal_frames:
-            recent_ids.pop(0)
-
-    if occ_filtered_count > 0:
-        print(f"  LiDAR filtered: {occ_filtered_count} annotations")
-
-    if not filter_cfg.get("output", False):
-        import shutil
-        d = os.path.join(run_dir, "LIDAR_FILTER")
-        if os.path.isdir(d):
-            shutil.rmtree(d)
-            print(f"  LIDAR_FILTER removed (output: false)")
-        return
-
-    print(f"  Done: {len(ann_files)} frames")
-    print(f"  LIDAR_FILTER kept (output: true)")
+    if total_dynamic_filtered > 0:
+        print(f"  Range filter: {total_dynamic_filtered} filtered, {total_dynamic_kept} kept")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -602,7 +523,8 @@ def _polygon_area(vertices):
     """Shoelace formula for convex polygon area."""
     if len(vertices) < 3:
         return 0.0
-    x = vertices[:, 0]; y = vertices[:, 1]
+    x = vertices[:, 0];
+    y = vertices[:, 1]
     return 0.5 * abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
 
 
@@ -617,7 +539,8 @@ def _clip_polygon_to_rect(poly, xmin, xmax, ymin, ymax):
     for val, dim, inside_fn in edges:
         clipped = []
         for i in range(len(poly)):
-            curr = poly[i]; prev = poly[i - 1]
+            curr = poly[i];
+            prev = poly[i - 1]
             c_in = inside_fn(curr[dim])
             p_in = inside_fn(prev[dim])
             if c_in:
@@ -718,13 +641,22 @@ def ensure_bbox_dims(run_dir):
 
 
 def annotate_camera(run_dir):
-
     layout = _load_sensor_layout(run_dir)
     if not layout:
         return
     valid_dir = os.path.join(run_dir, "ANNO", "valid")
     if not os.path.isdir(valid_dir):
         return
+
+    # ── CARLA semantic tags ──
+    VEHICLE_TAGS = {14, 15, 16, 17, 18, 19, 13}  # car, truck, bus, train, motorcycle, bicycle, rider
+    PEDESTRIAN_TAGS = {12}  # pedestrian
+
+    def _target_tags(category):
+        return PEDESTRIAN_TAGS if category == "pedestrian" else VEHICLE_TAGS
+
+    def _vis_threshold(category):
+        return 0.15 if category == "pedestrian" else 0.3
 
     # =========================
     # ego poses
@@ -777,13 +709,13 @@ def annotate_camera(run_dir):
         dz = bb["z"] / 2
 
         return np.array([
-            [ dx,  dy,  dz],
-            [ dx,  dy, -dz],
-            [ dx, -dy,  dz],
-            [ dx, -dy, -dz],
-            [-dx,  dy,  dz],
-            [-dx,  dy, -dz],
-            [-dx, -dy,  dz],
+            [dx, dy, dz],
+            [dx, dy, -dz],
+            [dx, -dy, dz],
+            [dx, -dy, -dz],
+            [-dx, dy, dz],
+            [-dx, dy, -dz],
+            [-dx, -dy, dz],
             [-dx, -dy, -dz],
         ])
 
@@ -799,7 +731,7 @@ def annotate_camera(run_dir):
         Z = pts[:, 2]
 
         valid = X > 0.1
-        if valid.sum() == 0:
+        if valid.sum() < 2:
             return None
 
         u = fx * (-Y / X) + cx
@@ -831,8 +763,11 @@ def annotate_camera(run_dir):
             m.radians(t.get("yaw", 0.0)),
         )
 
+        semantic_dir = os.path.join(run_dir, channel, "semantic")
         ann_dir = os.path.join(run_dir, channel, "annotations")
         os.makedirs(ann_dir, exist_ok=True)
+
+        total_filtered = 0
 
         for fname in sorted(os.listdir(valid_dir)):
             if not fname.endswith(".json"):
@@ -844,6 +779,18 @@ def annotate_camera(run_dir):
 
             ego = ego_ad[frame]
 
+            # ── load semantic image ──
+            semantic_img = None
+            sem_path = os.path.join(semantic_dir, f"{frame:08d}.png")
+            if os.path.exists(sem_path):
+                semantic_img = np.array(Image.open(sem_path))
+            elif os.path.exists(sem_path.replace(".png", ".npy")):
+                raw = np.load(sem_path.replace(".png", ".npy"))
+                if raw.ndim == 3 and raw.shape[2] == 4:
+                    semantic_img = raw[:, :, 2]
+                else:
+                    semantic_img = raw
+
             with open(os.path.join(valid_dir, fname)) as f:
                 anns = json.load(f)
 
@@ -851,9 +798,7 @@ def annotate_camera(run_dir):
 
             for a in anns:
 
-                # =========================
-                # 1. to sensor frame (ONLY place where transform happens)
-                # =========================
+                # ── 1. to sensor frame ──
                 sx, sy, sz, sroll, spitch, syaw = _to_sensor_local(
                     a["location"]["x"],
                     a["location"]["y"],
@@ -864,15 +809,11 @@ def annotate_camera(run_dir):
                     ego,
                     cam_offsets
                 )
-                # debug point (VERY IMPORTANT)
-                # print("sensor xyz:", sx, sy, sz)
 
                 if sx <= 0.1:
                     continue
 
-                # =========================
-                # 2. bbox corners
-                # =========================
+                # ── 2. project 3D bbox corners ──
                 corners = make_corners(a.get("bbox_3d", {}))
 
                 R = Rotation.from_euler(
@@ -883,50 +824,57 @@ def annotate_camera(run_dir):
 
                 corners = (R @ corners.T).T + np.array([sx, sy, sz])
 
-                # =========================
-                # 3. projection
-                # =========================
                 proj = project(K, corners)
                 if proj is None:
                     continue
 
-                u, v, valid = proj
-                u = u[valid]
-                v = v[valid]
+                u, v, valid_mask = proj
+                u = u[valid_mask]
+                v = v[valid_mask]
 
-                if len(u) < 2:
+                # ── 3. original bbox (before clipping) ──
+                xmin_o = u.min()
+                xmax_o = u.max()
+                ymin_o = v.min()
+                ymax_o = v.max()
+
+                original_area = (xmax_o - xmin_o) * (ymax_o - ymin_o)
+                if original_area <= 0:
                     continue
 
-                # =========================
-                # 4. bbox
-                # =========================
-                xmin = int(np.clip(u.min(), 0, w - 1))
-                xmax = int(np.clip(u.max(), 0, w - 1))
-                ymin = int(np.clip(v.min(), 0, h - 1))
-                ymax = int(np.clip(v.max(), 0, h - 1))
+                # ── 4. clip bbox to image bounds ──
+                xmin_c = max(0, int(xmin_o))
+                ymin_c = max(0, int(ymin_o))
+                xmax_c = min(w - 1, int(xmax_o))
+                ymax_c = min(h - 1, int(ymax_o))
 
-                if xmax <= xmin or ymax <= ymin:
+                if xmin_c >= xmax_c or ymin_c >= ymax_c:
                     continue
 
-                # filter: visible fraction must be >= 20% of total projected area
-                from scipy.spatial import ConvexHull as _ConvexHull
-                pts_2d = np.column_stack([u, v])
-                if len(pts_2d) >= 3:
-                    try:
-                        hull = _ConvexHull(pts_2d)
-                        hull_verts = pts_2d[hull.vertices]
-                        full_area = _polygon_area(hull_verts)
-                        if full_area > 0:
-                            clipped = _clip_polygon_to_rect(hull_verts, 0, w - 1, 0, h - 1)
-                            visible = _polygon_area(clipped)
-                            if visible / full_area < 0.2:
-                                continue
-                    except Exception:
-                        pass
+                clip_area = (xmax_c - xmin_c) * (ymax_c - ymin_c)
 
+                # ── 5. truncation ──
+                truncation = 1.0 - clip_area / original_area
+
+                # ── 6. semantic visibility ──
+                visibility = 1.0
+                if semantic_img is not None:
+                    roi = semantic_img[ymin_c:ymax_c, xmin_c:xmax_c]
+                    tags = _target_tags(a.get("category", "vehicle"))
+                    visible_pixels = sum(int((roi == t).sum()) for t in tags)
+                    visibility = visible_pixels / clip_area
+
+                # ── 7. filter by visibility ──
+                if visibility < _vis_threshold(a.get("category", "vehicle")):
+                    total_filtered += 1
+                    continue
+
+                # ── 8. save ──
                 entry = dict(a)
-                entry["bbox_2d"] = [xmin, ymin, xmax, ymax]
-
+                entry["bbox_2d"] = [xmin_c, ymin_c, xmax_c, ymax_c]
+                entry["bbox_original"] = [int(xmin_o), int(ymin_o), int(xmax_o), int(ymax_o)]
+                entry["truncation"] = round(truncation, 4)
+                entry["visibility"] = round(visibility, 4)
                 entry["location"] = {
                     "x": float(sx),
                     "y": float(sy),
@@ -939,17 +887,21 @@ def annotate_camera(run_dir):
             with open(out_path, "w") as f:
                 json.dump(projected, f)
 
-        print(f"[OK] {channel}")
+        print(f"[OK] {channel} (semantic filtered: {total_filtered})")
 
 
 def annotate_lidar(run_dir):
-    """Project ANNO/valid annotations into each LiDAR sensor frame with FOV filter."""
+    """Project ANNO/valid annotations into each LiDAR sensor frame with FOV + point-count filter."""
     layout = _load_sensor_layout(run_dir)
     if not layout:
         return
     valid_dir = os.path.join(run_dir, "ANNO", "valid")
     if not os.path.isdir(valid_dir):
         return
+
+    filter_cfg = _load_filter_config()
+    min_pts_floor = filter_cfg.get("min_pts", 3)
+    pts_per_m3 = filter_cfg.get("pts_per_m3", 5)
 
     # Load ego poses in AD coords
     ego_ad = {}
@@ -982,15 +934,23 @@ def annotate_lidar(run_dir):
             m.radians(t.get("yaw", 0.0)),
         )
 
+        pts_dir = os.path.join(run_dir, channel, "original")
         ann_dir = os.path.join(run_dir, channel, "annotations")
         os.makedirs(ann_dir, exist_ok=True)
         count = 0
+        total_pts_filtered = 0
 
         for fname in sorted(os.listdir(valid_dir)):
             frame = int(fname.replace(".json", ""))
             ego = ego_ad.get(frame)
             if ego is None:
                 continue
+
+            # Load LiDAR point cloud
+            pts = None
+            pts_path = os.path.join(pts_dir, f"{frame:08d}.npy")
+            if os.path.exists(pts_path):
+                pts = np.load(pts_path)
 
             with open(os.path.join(valid_dir, fname)) as f:
                 anns = json.load(f)
@@ -1003,7 +963,7 @@ def annotate_lidar(run_dir):
                     rot.get("roll", 0), rot.get("pitch", 0), rot.get("yaw", 0),
                     ego, lidar_offsets)
 
-                # Check if annotation center is within FOV
+                # ── FOV filter ──
                 d = m.sqrt(sx * sx + sy * sy + sz * sz)
                 if d > lidar_range:
                     continue
@@ -1016,6 +976,19 @@ def annotate_lidar(run_dir):
                     if abs(azim) > h_fov / 2:
                         continue
 
+                # ── point-count filter ──
+                if pts is not None:
+                    bb = a.get("bbox_3d", {})
+                    hx = bb["x"] / 2
+                    hy = bb["y"] / 2
+                    hz = bb["z"] / 2
+                    n = _count_points(pts, sx, sy, syaw, hx, hy)
+                    volume = (2 * hx) * (2 * hy) * (2 * hz)
+                    threshold = max(min_pts_floor, int(volume * pts_per_m3))
+                    if n < threshold:
+                        total_pts_filtered += 1
+                        continue
+
                 entry = dict(a)
                 entry["location"] = {"x": sx, "y": sy, "z": sz}
                 entry["rotation"] = {"roll": sroll, "pitch": spitch, "yaw": syaw}
@@ -1026,7 +999,7 @@ def annotate_lidar(run_dir):
                 json.dump(projected, f)
             count += 1
 
-        print(f"  {channel}/annotations: {count} frames")
+        print(f"  {channel}/annotations: {count} frames (pts filtered: {total_pts_filtered})")
 
 
 def simulate_async(run_dir):
@@ -1095,12 +1068,12 @@ def dedup_static_bboxes(run_dir):
 
     before = len(static_bboxes)
     static_bboxes = [sb for sb in static_bboxes
-                     if not any(((sb["location"]["x"] - a["location"]["x"])**2 +
-                                 (sb["location"]["y"] - a["location"]["y"])**2)**0.5 < 2.0
+                     if not any(((sb["location"]["x"] - a["location"]["x"]) ** 2 +
+                                 (sb["location"]["y"] - a["location"]["y"]) ** 2) ** 0.5 < 2.0
                                 for a in dyn_actors)
                      and not (ego_pos is not None and
-                              ((sb["location"]["x"] - ego_pos[0])**2 +
-                               (sb["location"]["y"] - ego_pos[1])**2)**0.5 < 0.5)]
+                              ((sb["location"]["x"] - ego_pos[0]) ** 2 +
+                               (sb["location"]["y"] - ego_pos[1]) ** 2) ** 0.5 < 0.5)]
     after = len(static_bboxes)
     with open(static_path, "w") as f:
         json.dump(static_bboxes, f)
